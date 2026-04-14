@@ -1,0 +1,32 @@
+[project]
+name = "conductarr"
+authors = [{ name = "Lennard Beers", email = "l.beers@outlook.de" }]
+maintainers = [{ name = "Lennard Beers", email = "l.beers@outlook.de" }]
+license = { file = "LICENSE.md" }
+description = ""
+readme = "README.md"
+requires-python = ">=3.14"
+version = "0.0.0-dev"
+dependencies = [
+    "pydantic>=2.12.5",
+    "python-dotenv>=1.2.2",
+    "pyyaml>=6.0.3",
+    "typer>=0.24.1",
+    "tzdata>=2025.2",
+]
+
+[project.scripts]
+boomarr = "boomarr.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.20.0",
+    "pytest>=9.0.2",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.9",
+    "types-pyyaml>=6.0.12.20250915",
+]

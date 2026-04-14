@@ -1,0 +1,26 @@
+# Version control
+.git/
+.gitignore
+
+# Python bytecode / build artefacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+
+# Tests
+tests/
+
+# IDE
+.vscode/
+.idea/
+
+# Config / secrets (never bake into the image)
+config/
+.env
+
+# Docker files themselves
+docker-compose.yml
+.dockerignore

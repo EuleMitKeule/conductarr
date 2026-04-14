@@ -1,0 +1,14 @@
+services:
+  conductarr:
+    image: ghcr.io/eulemitkeule/conductarr:latest
+    container_name: conductarr
+    restart: unless-stopped
+    environment:
+      PUID: 1000
+      PGID: 1000
+      UMASK: "022"
+      TZ: UTC
+      LOG_LEVEL: info
+    volumes:
+      - /path/to/conductarr/config:/config  # Mount the config directory
+    command: conductarr watch

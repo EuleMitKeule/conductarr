@@ -1,0 +1,140 @@
+name: Code Quality
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+  push:
+    branches:
+      - master
+      - develop
+
+env:
+  PYTHON_VERSION: "3.14"
+  SONAR_PROJECT_KEY: EuleMitKeule_conductarr
+  SONAR_PROJECT_ORGANIZATION: eule
+
+jobs:
+  cache:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-suffix: uv-${{ runner.os }}-${{ env.PYTHON_VERSION }}
+
+      - name: Install dependecies
+        run: uv sync --all-groups
+
+  ruff:
+    needs: cache
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-suffix: uv-${{ runner.os }}-${{ env.PYTHON_VERSION }}
+
+      - name: Install dependecies
+        run: uv sync --all-groups
+
+      - name: Run ruff
+        run: |
+          uv run ruff check .
+
+  mypy:
+    needs: cache
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-suffix: uv-${{ runner.os }}-${{ env.PYTHON_VERSION }}
+
+      - name: Install dependecies
+        run: uv sync --all-groups
+
+      - name: Run mypy
+        run: |
+          uv run mypy --strict .
+
+  tests:
+    needs: cache
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-suffix: uv-${{ runner.os }}-${{ env.PYTHON_VERSION }}
+
+      - name: Install dependecies
+        run: uv sync --all-groups
+
+      - name: Run tests
+        run: |
+          uv run pytest --cov=. --cov-report=term tests
+
+  sonar:
+    needs: cache
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-suffix: uv-${{ runner.os }}-${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Run tests
+        run: |
+          uv run pytest --cov=. --cov-report=xml --cov-report=term tests
+
+      - name: fix code coverage paths
+        run: |
+          sed -i 's|/home/runner/work/conductarr/conductarr|/github/workspace|g' coverage.xml
+
+      - name: Run SonarCloud analysis
+        uses: SonarSource/sonarqube-scan-action@v7.1.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          args: >
+            -Dsonar.organization=${{ env.SONAR_PROJECT_ORGANIZATION }}
+            -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }}
+            -Dsonar.python.coverage.reportPaths=coverage.xml
+            -Dsonar.sources=conductarr
+            -Dsonar.tests=tests
+            -Dsonar.python.version=${{ env.PYTHON_VERSION }}
+            -Dsonar.text.inclusions=**/*.py

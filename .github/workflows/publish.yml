@@ -1,0 +1,137 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+env:
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.set_output.outputs.version }}
+    env:
+      VERSION: ""
+    steps:
+      - name: Get version from release
+        if: github.event_name == 'release'
+        run: |
+          echo "VERSION=${{ github.event.release.tag_name }}" >> $GITHUB_ENV
+
+      - name: Get release from API
+        if: github.event_name == 'workflow_dispatch'
+        id: release_api
+        uses: octokit/request-action@v3.0.0
+        with:
+          route: GET /repos/${{ github.repository }}/releases/latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT }}
+
+      - name: Parse API response
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "VERSION=${{ fromJson(steps.release_api.outputs.data).tag_name }}" >> $GITHUB_ENV
+
+      - name: Log version
+        run: |
+          echo "Version: $VERSION"
+
+      - name: Fail if no version
+        run: |
+          if [[ -z "$VERSION" ]]; then
+            echo "Missing version"
+            exit 1
+          fi
+
+      - name: Set outputs
+        id: set_output
+        run: |
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+  package:
+    needs: version
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/conductarr
+    permissions:
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-suffix: uv-${{ runner.os }}-${{ env.PYTHON_VERSION }}
+
+      - name: Install dependecies
+        run: uv sync
+
+      - name: Set all versions
+        run: |
+          $version = "${{ needs.version.outputs.version }}"
+          Get-ChildItem -Recurse -File | ForEach-Object {
+            (Get-Content $_.FullName -Raw) -replace '0\.0\.0-dev', $version | Set-Content $_.FullName -NoNewline
+          }
+        shell: pwsh
+
+      - name: Build package
+        run: |
+          uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@v1.13.0
+
+      - name: Upload assets to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT }}
+        run: |
+          gh release upload "${{ needs.version.outputs.version }}" \
+            ./dist/conductarr-${{ needs.version.outputs.version }}.tar.gz \
+            ./dist/conductarr-${{ needs.version.outputs.version }}-py3-none-any.whl
+
+  docker:
+    needs: version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6.0.2
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6.0.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=${{ needs.version.outputs.version }}
+            type=raw,value=latest
+
+      - name: Build and publish Docker image
+        uses: docker/build-push-action@v7.0.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
