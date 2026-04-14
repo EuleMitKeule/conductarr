@@ -118,7 +118,7 @@ def watch(
     Monitors the source library for changes and keeps symlinks up to date
     without requiring manual rescans.
     """
-    config = _init_config(
+    _config = _init_config(
         config_dir, config_file_name, log_level, log_dir, log_file_name
     )
     _LOGGER.info("Starting watch mode")
@@ -171,7 +171,7 @@ def status(
     Displays a summary of the current cache state and when the last scan
     was performed.
     """
-    config = _init_config(
+    _config = _init_config(
         config_dir, config_file_name, log_level, log_dir, log_file_name
     )
     _LOGGER.info("Showing status")
