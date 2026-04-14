@@ -11,3 +11,5 @@
 [![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=EuleMitKeule_conductarr&metric=vulnerabilities)](https://sonarcloud.io/summary/new_code?id=EuleMitKeule_conductarr)
 [![Code Smells](https://sonarcloud.io/api/project_badges/measure?project=EuleMitKeule_conductarr&metric=code_smells)](https://sonarcloud.io/summary/new_code?id=EuleMitKeule_conductarr)
 [![Technical Debt](https://sonarcloud.io/api/project_badges/measure?project=EuleMitKeule_conductarr&metric=sqale_index)](https://sonarcloud.io/summary/new_code?id=EuleMitKeule_conductarr)
+
+🎼 Priority-based download queue orchestrator for Radarr, Sonarr & SABnzbd — automatically manages and reorders your download queue across multiple priority tiers.
