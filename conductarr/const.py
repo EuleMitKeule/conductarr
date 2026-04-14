@@ -5,6 +5,7 @@ from pathlib import Path
 
 VERSION = "0.0.0-dev"
 APP_NAME = "conductarr"
+APP_DESCRIPTION = "🎼 Priority-based download queue orchestrator for Radarr, Sonarr & SABnzbd — automatically manages and reorders your download queue across multiple priority tiers."
 
 
 class LogLevel(StrEnum):

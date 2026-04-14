@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 from conductarr.config import Config, SQLiteDatabaseConfig, load_config
 from conductarr.const import (
+    APP_DESCRIPTION,
     APP_NAME,
     DEFAULT_CONFIG_DIR,
     DEFAULT_CONFIG_FILE_NAME,
@@ -32,7 +33,7 @@ _LOGGER = logging.getLogger(APP_NAME)
 
 app = typer.Typer(
     name=APP_NAME,
-    help="",
+    help=APP_DESCRIPTION,
     no_args_is_help=True,
 )
 

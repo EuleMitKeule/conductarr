@@ -3,7 +3,7 @@ name = "conductarr"
 authors = [{ name = "Lennard Beers", email = "l.beers@outlook.de" }]
 maintainers = [{ name = "Lennard Beers", email = "l.beers@outlook.de" }]
 license = { file = "LICENSE.md" }
-description = ""
+description = "🎼 Priority-based download queue orchestrator for Radarr, Sonarr & SABnzbd — automatically manages and reorders your download queue across multiple priority tiers."
 readme = "README.md"
 requires-python = ">=3.14"
 version = "0.0.0-dev"
