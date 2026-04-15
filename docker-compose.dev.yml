@@ -8,10 +8,14 @@ services:
       UMASK: "022"
       TZ: UTC
       LOG_LEVEL: debug
-      DEV_SAB_INI: /sabnzbd.ini
+      DEV_SAB_INI: /dev/sabnzbd/sabnzbd.ini
+      DEV_RADARR_CONFIG: /dev/radarr/config.xml
+      DEV_SONARR_CONFIG: /dev/sonarr/config.xml
     volumes:
       - ./config-docker:/config
-      - ./dev/sabnzbd/sabnzbd.ini:/sabnzbd.ini:ro
+      - ./dev/sabnzbd/sabnzbd.ini:/dev/sabnzbd/sabnzbd.ini:ro
+      - ./dev/radarr:/dev/radarr:ro
+      - ./dev/sonarr:/dev/sonarr:ro
     command: conductarr watch
     healthcheck:
       test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
@@ -21,6 +25,10 @@ services:
       start_period: 5s
     depends_on:
       sabnzbd:
+        condition: service_healthy
+      radarr:
+        condition: service_healthy
+      sonarr:
         condition: service_healthy
 
   sabnzbd:
@@ -40,3 +48,37 @@ services:
       timeout: 5s
       retries: 20
       start_period: 5s
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: UTC
+    volumes:
+      - ./dev/radarr:/config
+    ports:
+      - "7878:7878"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7878/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    environment:
+      PUID: 1000
+      PGID: 1000
+      TZ: UTC
+    volumes:
+      - ./dev/sonarr:/config
+    ports:
+      - "8989:8989"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8989/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10

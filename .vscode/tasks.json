@@ -50,6 +50,13 @@
             "label": "Run Example Flow",
             "type": "shell",
             "command": "powershell -ExecutionPolicy Bypass -File scripts/run_example_flow.ps1",
+            "options": {
+                "env": {
+                    "SABNZBD_URL": "http://localhost:8080",
+                    "RADARR_URL": "http://localhost:7878",
+                    "SONARR_URL": "http://localhost:8989"
+                }
+            },
             "presentation": {
                 "panel": "dedicated",
                 "reveal": "always",

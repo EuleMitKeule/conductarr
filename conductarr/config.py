@@ -8,13 +8,15 @@ import os
 import re
 import sys
 import zoneinfo
+import xml.etree.ElementTree as ET
 from enum import Enum
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 
 import typer
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from conductarr.const import (
     APP_NAME,
@@ -44,24 +46,53 @@ from conductarr.const import (
     DEFAULT_PUID,
     DEFAULT_TZ,
     DEFAULT_UMASK,
-    ENV_DEV_SAB_INI,
     ENV_PREFIX_GENERAL,
     ENV_PREFIX_LOG_ROTATION,
     ENV_PREFIX_LOGGING,
-    ENV_PREFIX_SABNZBD,
+    ENV_DEV_SAB_INI,
+    ENV_DEV_RADARR_CONFIG,
+    ENV_DEV_SONARR_CONFIG,
     DatabaseType,
     LogLevel,
 )
 
 __all__ = [
     "AnyDatabaseConfig",
+    "ConductarrConfig",
+    "ConfigError",
     "DatabaseType",
     "MemoryDatabaseConfig",
+    "RadarrConfig",
     "SabnzbdConfig",
+    "SonarrConfig",
     "SQLiteDatabaseConfig",
 ]
 
 _LOGGER = logging.getLogger(APP_NAME)
+
+
+def _read_sabnzbd_api_key(ini_path: Path) -> str:
+    """Read the SABnzbd API key from a sabnzbd.ini file.
+
+    SABnzbd's ini starts with bare ``__version__`` / ``__encoding__`` lines
+    before any section header, which configparser cannot handle.  A simple
+    regex search avoids that problem entirely.
+    """
+    if not ini_path.exists():
+        return ""
+    text = ini_path.read_text(encoding="utf-8")
+    m = re.search(r"^api_key\s*=\s*(\S+)", text, re.MULTILINE)
+    return m.group(1) if m else ""
+
+
+def _read_arr_api_key(xml_path: Path) -> str:
+    """Read the API key from a Radarr/Sonarr config.xml file."""
+    if not xml_path.exists():
+        return ""
+    tree = ET.parse(xml_path)  # noqa: S314 – trusted local dev file
+    root = tree.getroot()
+    elem = root.find("ApiKey")
+    return elem.text.strip() if elem is not None and elem.text else ""
 
 
 class GeneralConfig(BaseModel):
@@ -218,75 +249,82 @@ AnyDatabaseConfig = MemoryDatabaseConfig | SQLiteDatabaseConfig
 
 
 # ---------------------------------------------------------------------------
-# SABnzbd / engine configuration
+# Service configuration (plain dataclasses)
 # ---------------------------------------------------------------------------
 
 
-def _read_sabnzbd_ini(path: Path) -> dict[str, str]:
-    """Extract key settings from a SABnzbd ini file.
-
-    Returns a dict with any of the keys ``api_key``, ``port``, ``host``
-    that are present in the file's ``[misc]`` section.
-    """
-    content = path.read_text(encoding="utf-8")
-    result: dict[str, str] = {}
-    for key in ("api_key", "port", "host"):
-        m = re.search(rf"^{key}\s*=\s*(.+)$", content, re.MULTILINE)
-        if m:
-            result[key] = m.group(1).strip()
-    return result
+class ConfigError(Exception):
+    """Raised when the configuration file is invalid or incomplete."""
 
 
-class SabnzbdConfig(BaseModel):
-    """SABnzbd client sub-configuration.
+@dataclass
+class SabnzbdConfig:
+    url: str
+    api_key: str
 
-    Auto-discovered from the ``sabnzbd:`` section in ``conductarr.yml``::
 
-        sabnzbd:
-          url: http://localhost:8080
-          api_key: your_api_key
-          poll_interval: 15.0   # optional, default 15.0
+@dataclass
+class RadarrConfig:
+    url: str
+    api_key: str
 
-    Dev mode:
-        Set the ``DEV_SAB_INI`` environment variable to the path of a
-        mounted ``sabnzbd.ini`` file.  When set, any missing ``url`` or
-        ``api_key`` values are automatically populated from the ini.
-        Explicit config always takes precedence.
-    """
 
-    _env_prefix: ClassVar[str] = ENV_PREFIX_SABNZBD
+@dataclass
+class SonarrConfig:
+    url: str
+    api_key: str
 
-    url: str = Field(default="")
-    api_key: str = Field(default="")
-    poll_interval: float = Field(default=DEFAULT_POLL_INTERVAL)
 
-    @model_validator(mode="after")
-    def _fill_from_dev_ini(self) -> "SabnzbdConfig":
-        """When ``DEV_SAB_INI`` is set, fill in missing url/api_key from the ini."""
-        dev_ini_str = os.environ.get(ENV_DEV_SAB_INI)
-        if not dev_ini_str:
-            return self
+@dataclass
+class ConductarrConfig:
+    poll_interval: float
+    sabnzbd: SabnzbdConfig
+    radarr: RadarrConfig
+    sonarr: SonarrConfig
 
-        dev_ini_path = Path(dev_ini_str)
-        if not dev_ini_path.is_file():
-            _LOGGER.warning("DEV_SAB_INI='%s' does not exist, ignoring", dev_ini_path)
-            return self
+    @classmethod
+    def from_yaml(cls, path: Path) -> "ConductarrConfig":
+        """Load service configuration from a YAML file.
 
-        _LOGGER.warning(
-            "Dev mode active: reading SABnzbd settings from '%s'",
-            dev_ini_path,
+        Raises:
+            ConfigError: If any required section is missing.
+        """
+        with open(path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+
+        conductarr_data = data.get("conductarr", {})
+        poll_interval = float(
+            conductarr_data.get("poll_interval", DEFAULT_POLL_INTERVAL)
         )
-        ini = _read_sabnzbd_ini(dev_ini_path)
 
-        if not self.url and "port" in ini:
-            port = ini.get("port", "8080")
-            object.__setattr__(self, "url", f"http://sabnzbd:{port}")
-            _LOGGER.debug("Dev mode: url set to '%s' from ini port", self.url)
-        if not self.api_key and "api_key" in ini:
-            object.__setattr__(self, "api_key", ini["api_key"])
-            _LOGGER.debug("Dev mode: api_key loaded from ini")
+        for section in ("sabnzbd", "radarr", "sonarr"):
+            if section not in data:
+                raise ConfigError(f"Missing required config section: '{section}'")
 
-        return self
+        sab_data: dict[str, Any] = dict(data["sabnzbd"])
+        if not sab_data.get("api_key"):
+            if ini_path := os.environ.get(ENV_DEV_SAB_INI):
+                sab_data["api_key"] = _read_sabnzbd_api_key(Path(ini_path))
+                _LOGGER.debug("SABnzbd API key loaded from %s", ini_path)
+
+        radarr_data: dict[str, Any] = dict(data["radarr"])
+        if not radarr_data.get("api_key"):
+            if xml_path := os.environ.get(ENV_DEV_RADARR_CONFIG):
+                radarr_data["api_key"] = _read_arr_api_key(Path(xml_path))
+                _LOGGER.debug("Radarr API key loaded from %s", xml_path)
+
+        sonarr_data: dict[str, Any] = dict(data["sonarr"])
+        if not sonarr_data.get("api_key"):
+            if xml_path := os.environ.get(ENV_DEV_SONARR_CONFIG):
+                sonarr_data["api_key"] = _read_arr_api_key(Path(xml_path))
+                _LOGGER.debug("Sonarr API key loaded from %s", xml_path)
+
+        return cls(
+            poll_interval=poll_interval,
+            sabnzbd=SabnzbdConfig(**sab_data),
+            radarr=RadarrConfig(**radarr_data),
+            sonarr=SonarrConfig(**sonarr_data),
+        )
 
 
 class Config(BaseModel):
@@ -296,7 +334,6 @@ class Config(BaseModel):
     config_file: str
     general: GeneralConfig
     logging: LoggingConfig
-    sabnzbd: SabnzbdConfig = Field(default_factory=SabnzbdConfig)
     database: AnyDatabaseConfig = Field(
         default_factory=SQLiteDatabaseConfig, discriminator="type"
     )

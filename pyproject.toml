@@ -10,6 +10,7 @@ version = "0.0.0-dev"
 dependencies = [
     "aiohttp>=3.13.5",
     "pydantic>=2.12.5",
+    "pyarr>=5.0.0",
     "python-dotenv>=1.2.2",
     "pyyaml>=6.0.3",
     "typer>=0.24.1",

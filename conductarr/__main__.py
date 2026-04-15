@@ -12,7 +12,12 @@ from typing import Annotated
 import typer
 from dotenv import load_dotenv
 
-from conductarr.config import Config, SQLiteDatabaseConfig, load_config
+from conductarr.config import (
+    Config,
+    ConductarrConfig,
+    SQLiteDatabaseConfig,
+    load_config,
+)
 from conductarr.const import (
     APP_DESCRIPTION,
     APP_NAME,
@@ -124,9 +129,13 @@ def watch(
         config_dir, config_file_name, log_level, log_dir, log_file_name
     )
 
+    conductarr_config = ConductarrConfig.from_yaml(
+        config.config_dir / config.config_file
+    )
+
     from conductarr.engine import ConductarrEngine
 
-    engine = ConductarrEngine(config)
+    engine = ConductarrEngine(conductarr_config)
 
     async def _run() -> None:
         await engine.start()

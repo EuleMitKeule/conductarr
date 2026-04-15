@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import logging
 
+from conductarr.clients.radarr import RadarrClient
 from conductarr.clients.sabnzbd import SABnzbdClient
-from conductarr.config import Config
+from conductarr.clients.sonarr import SonarrClient
+from conductarr.config import ConductarrConfig
 from conductarr.events import (
+    ConductarrEvent,
     JobAddedEvent,
     JobPriorityChangedEvent,
     JobRemovedEvent,
@@ -14,7 +17,13 @@ from conductarr.events import (
     QueuePausedEvent,
     QueueResumedEvent,
     QueueSnapshotEvent,
-    SabnzbdEvent,
+    RadarrQueueItemAddedEvent,
+    RadarrQueueItemRemovedEvent,
+    RadarrQueueSnapshotEvent,
+    ServiceUnavailableEvent,
+    SonarrQueueItemAddedEvent,
+    SonarrQueueItemRemovedEvent,
+    SonarrQueueSnapshotEvent,
 )
 from conductarr.monitor import SabnzbdMonitor
 
@@ -28,15 +37,25 @@ class ConductarrEngine:
     Designed to be extended with queue managers and other handlers later.
     """
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: ConductarrConfig) -> None:
         self._config = config
         self._client = SABnzbdClient(
             url=config.sabnzbd.url,
             api_key=config.sabnzbd.api_key,
         )
+        self._radarr_client = RadarrClient(
+            url=config.radarr.url,
+            api_key=config.radarr.api_key,
+        )
+        self._sonarr_client = SonarrClient(
+            url=config.sonarr.url,
+            api_key=config.sonarr.api_key,
+        )
         self._monitor = SabnzbdMonitor(
             client=self._client,
-            poll_interval=config.sabnzbd.poll_interval,
+            radarr_client=self._radarr_client,
+            sonarr_client=self._sonarr_client,
+            poll_interval=config.poll_interval,
             on_event=self._handle_event,
         )
 
@@ -51,7 +70,7 @@ class ConductarrEngine:
         await self._monitor.stop()
         await self._client.__aexit__(None, None, None)
 
-    async def _handle_event(self, event: SabnzbdEvent) -> None:
+    async def _handle_event(self, event: ConductarrEvent) -> None:
         """Dispatch an event to the appropriate handler."""
         match event:
             case QueueSnapshotEvent():
@@ -95,5 +114,52 @@ class ConductarrEngine:
                 _LOGGER.info("Event: %s", type(event).__name__)
             case QueueResumedEvent():
                 _LOGGER.info("Event: %s", type(event).__name__)
+            case RadarrQueueSnapshotEvent():
+                _LOGGER.info(
+                    "Event: %s  items=%d",
+                    type(event).__name__,
+                    len(event.items),
+                )
+            case RadarrQueueItemAddedEvent():
+                _LOGGER.info(
+                    "Event: %s  download_id=%s  title=%s",
+                    type(event).__name__,
+                    event.item.download_id,
+                    event.item.title,
+                )
+            case RadarrQueueItemRemovedEvent():
+                _LOGGER.info(
+                    "Event: %s  download_id=%s  title=%s",
+                    type(event).__name__,
+                    event.download_id,
+                    event.title,
+                )
+            case SonarrQueueSnapshotEvent():
+                _LOGGER.info(
+                    "Event: %s  items=%d",
+                    type(event).__name__,
+                    len(event.items),
+                )
+            case SonarrQueueItemAddedEvent():
+                _LOGGER.info(
+                    "Event: %s  download_id=%s  title=%s",
+                    type(event).__name__,
+                    event.item.download_id,
+                    event.item.title,
+                )
+            case SonarrQueueItemRemovedEvent():
+                _LOGGER.info(
+                    "Event: %s  download_id=%s  title=%s",
+                    type(event).__name__,
+                    event.download_id,
+                    event.title,
+                )
+            case ServiceUnavailableEvent():
+                _LOGGER.info(
+                    "Event: %s  service=%s  error=%s",
+                    type(event).__name__,
+                    event.service,
+                    event.error,
+                )
             case _:
                 _LOGGER.info("Event: %s", type(event).__name__)

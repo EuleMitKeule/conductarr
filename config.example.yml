@@ -1,1 +1,15 @@
 ---
+conductarr:
+  poll_interval: 15.0
+
+sabnzbd:
+  url: http://sabnzbd:8080
+  api_key: xxx
+
+radarr:
+  url: http://radarr:7878
+  api_key: xxx
+
+sonarr:
+  url: http://sonarr:8989
+  api_key: xxx
