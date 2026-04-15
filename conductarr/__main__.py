@@ -13,8 +13,8 @@ import typer
 from dotenv import load_dotenv
 
 from conductarr.config import (
-    Config,
     ConductarrConfig,
+    Config,
     SQLiteDatabaseConfig,
     load_config,
 )
