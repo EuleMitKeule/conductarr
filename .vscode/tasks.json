@@ -3,7 +3,10 @@
     "tasks": [
         {
             "label": "Dev Flow",
-            "dependsOn": ["Reset SABnzbd", "Start App"],
+            "dependsOn": [
+                "Reset SABnzbd",
+                "Start App"
+            ],
             "dependsOrder": "sequence",
             "group": {
                 "kind": "build",
@@ -12,7 +15,10 @@
         },
         {
             "label": "Start App",
-            "dependsOn": ["Start Dev Stack", "Run Example Flow"],
+            "dependsOn": [
+                "Start Dev Stack",
+                "Run Example Flow"
+            ],
             "dependsOrder": "parallel"
         },
         {
