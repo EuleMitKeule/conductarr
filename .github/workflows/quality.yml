@@ -100,10 +100,12 @@ jobs:
           COVERAGE_FILE: .coverage.unit
 
       - name: Upload unit test coverage
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-unit
           path: .coverage.unit
+          if-no-files-found: warn
 
   integration-tests:
     needs: cache
@@ -165,10 +167,12 @@ jobs:
         run: docker compose -f docker-compose.dev.yml logs mock-sabnzbd mock-radarr mock-sonarr
 
       - name: Upload integration test coverage
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-integration
           path: .coverage.integration
+          if-no-files-found: warn
 
       - name: Stop mock services
         if: always()
@@ -194,19 +198,26 @@ jobs:
         run: uv sync --all-groups
 
       - name: Download unit test coverage
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: coverage-unit
 
       - name: Download integration test coverage
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: coverage-integration
 
       - name: Combine coverage reports
         run: |
-          uv run coverage combine .coverage.unit .coverage.integration
-          uv run coverage xml
+          FILES=$(ls .coverage.unit .coverage.integration 2>/dev/null | tr '\n' ' ')
+          if [ -n "$FILES" ]; then
+            uv run coverage combine $FILES
+            uv run coverage xml
+          else
+            echo "No coverage files found, skipping XML report"
+          fi
 
       - name: fix code coverage paths
         run: |
