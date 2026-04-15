@@ -17,7 +17,7 @@ dependencies = [
 ]
 
 [project.scripts]
-boomarr = "boomarr.__main__:main"
+conductarr = "conductarr.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

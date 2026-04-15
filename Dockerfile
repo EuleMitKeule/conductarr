@@ -10,6 +10,10 @@ RUN mkdir -p conductarr && touch conductarr/__init__.py conductarr/py.typed \
 COPY conductarr/ ./conductarr/
 RUN pip install --no-cache-dir --no-deps .
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd -g 1000 conductarr \
     && useradd -u 1000 -g conductarr -m --no-log-init conductarr \
     && mkdir -p /config \

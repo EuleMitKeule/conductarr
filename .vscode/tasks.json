@@ -1,0 +1,50 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Dev Flow",
+            "dependsOn": [
+                "Start Dev Stack",
+                "Run Example Flow"
+            ],
+            "dependsOrder": "parallel",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Start Dev Stack",
+            "type": "shell",
+            "command": "docker compose -f docker-compose.dev.yml up --build",
+            "group": "build",
+            "presentation": {
+                "panel": "dedicated",
+                "reveal": "always",
+                "group": "dev-flow"
+            }
+        },
+        {
+            "label": "Stop Dev Stack",
+            "type": "shell",
+            "command": "docker compose -f docker-compose.dev.yml down",
+            "presentation": {
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "Run Example Flow",
+            "type": "shell",
+            "command": "uv run python scripts/example_flow.py",
+            "group": "build",
+            "presentation": {
+                "panel": "dedicated",
+                "reveal": "always",
+                "group": "dev-flow"
+            }
+        }
+    ]
+}
