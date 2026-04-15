@@ -6,9 +6,8 @@ import asyncio
 import os
 
 import uvicorn
-
-from sabnzbd.app import app as sabnzbd_app
 from radarr.app import app as radarr_app
+from sabnzbd.app import app as sabnzbd_app
 from sonarr.app import app as sonarr_app
 
 _ALL_SERVICES = [

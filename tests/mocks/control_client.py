@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import httpx
 from typing import Any, cast
+
+import httpx
 
 
 class _BaseControlClient:
