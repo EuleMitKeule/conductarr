@@ -95,7 +95,9 @@ jobs:
 
       - name: Run unit tests
         run: |
-          uv run pytest tests/unit -v --cov=conductarr --cov-report=term --cov-data-file=.coverage.unit
+          uv run pytest tests/unit -v --cov=conductarr --cov-report=term
+        env:
+          COVERAGE_FILE: .coverage.unit
 
       - name: Upload unit test coverage
         if: always()
@@ -153,8 +155,9 @@ jobs:
         run: uv sync --all-groups
 
       - name: Run integration tests
-        run: uv run pytest tests/integration -v --cov=conductarr --cov-report=term --cov-data-file=.coverage.integration
+        run: uv run pytest tests/integration -v --cov=conductarr --cov-report=term
         env:
+          COVERAGE_FILE: .coverage.integration
           SABNZBD_URL: http://localhost:8080
           RADARR_URL: http://localhost:7878
           SONARR_URL: http://localhost:8989
