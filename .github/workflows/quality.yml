@@ -197,14 +197,6 @@ jobs:
         with:
           name: coverage-integration
 
-      - name: Fix code coverage paths
-        run: |
-          for f in coverage-unit.xml coverage-integration.xml; do
-            if [ -f "$f" ]; then
-              sed -i 's|/home/runner/work/conductarr/conductarr|/github/workspace|g' "$f"
-            fi
-          done
-
       - name: Run SonarCloud analysis
         uses: SonarSource/sonarqube-scan-action@v7.1.0
         env:
