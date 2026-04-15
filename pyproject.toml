@@ -9,6 +9,7 @@ requires-python = ">=3.14"
 version = "0.0.0-dev"
 dependencies = [
     "aiohttp>=3.13.5",
+    "aiosqlite>=0.21.0",
     "pydantic>=2.12.5",
     "pyarr>=5.0.0",
     "python-dotenv>=1.2.2",

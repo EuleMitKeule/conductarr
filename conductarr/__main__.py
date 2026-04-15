@@ -135,7 +135,7 @@ def watch(
 
     from conductarr.engine import ConductarrEngine
 
-    engine = ConductarrEngine(conductarr_config)
+    engine = ConductarrEngine(conductarr_config, database_config=config.database)
 
     async def _run() -> None:
         await engine.start()

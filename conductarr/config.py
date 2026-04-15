@@ -9,7 +9,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 import zoneinfo
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar, Literal
@@ -61,11 +61,13 @@ __all__ = [
     "ConductarrConfig",
     "ConfigError",
     "DatabaseType",
+    "MatcherConfig",
     "MemoryDatabaseConfig",
     "RadarrConfig",
     "SabnzbdConfig",
     "SonarrConfig",
     "SQLiteDatabaseConfig",
+    "VirtualQueueConfig",
 ]
 
 _LOGGER = logging.getLogger(APP_NAME)
@@ -276,11 +278,26 @@ class SonarrConfig:
 
 
 @dataclass
+class MatcherConfig:
+    type: str
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class VirtualQueueConfig:
+    name: str
+    priority: int
+    enabled: bool = True
+    matchers: list[MatcherConfig] = field(default_factory=list)
+
+
+@dataclass
 class ConductarrConfig:
     poll_interval: float
     sabnzbd: SabnzbdConfig
     radarr: RadarrConfig
     sonarr: SonarrConfig
+    queues: list[VirtualQueueConfig] = field(default_factory=list)
 
     @classmethod
     def from_yaml(cls, path: Path) -> "ConductarrConfig":
@@ -319,11 +336,25 @@ class ConductarrConfig:
                 sonarr_data["api_key"] = _read_arr_api_key(Path(xml_path))
                 _LOGGER.debug("Sonarr API key loaded from %s", xml_path)
 
+        # Parse virtual queues
+        queues: list[VirtualQueueConfig] = []
+        for q in data.get("queues", []):
+            matchers = [MatcherConfig(**m) for m in q.get("matchers", [])]
+            queues.append(
+                VirtualQueueConfig(
+                    name=q["name"],
+                    priority=int(q["priority"]),
+                    enabled=q.get("enabled", True),
+                    matchers=matchers,
+                )
+            )
+
         return cls(
             poll_interval=poll_interval,
             sabnzbd=SabnzbdConfig(**sab_data),
             radarr=RadarrConfig(**radarr_data),
             sonarr=SonarrConfig(**sonarr_data),
+            queues=queues,
         )
 
 

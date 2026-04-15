@@ -7,7 +7,9 @@ import logging
 from conductarr.clients.radarr import RadarrClient
 from conductarr.clients.sabnzbd import SABnzbdClient
 from conductarr.clients.sonarr import SonarrClient
-from conductarr.config import ConductarrConfig
+from conductarr.config import AnyDatabaseConfig, ConductarrConfig, SQLiteDatabaseConfig
+from conductarr.db.database import Database
+from conductarr.db.repository import QueueRepository
 from conductarr.events import (
     ConductarrEvent,
     JobAddedEvent,
@@ -26,6 +28,8 @@ from conductarr.events import (
     SonarrQueueSnapshotEvent,
 )
 from conductarr.monitor import SabnzbdMonitor
+from conductarr.queue.manager import QueueManager
+from conductarr.queue.models import VirtualQueue
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,7 +41,9 @@ class ConductarrEngine:
     Designed to be extended with queue managers and other handlers later.
     """
 
-    def __init__(self, config: ConductarrConfig) -> None:
+    def __init__(
+        self, config: ConductarrConfig, database_config: AnyDatabaseConfig | None = None
+    ) -> None:
         self._config = config
         self._client = SABnzbdClient(
             url=config.sabnzbd.url,
@@ -59,8 +65,24 @@ class ConductarrEngine:
             on_event=self._handle_event,
         )
 
+        # Database and queue management
+        db_config = database_config or SQLiteDatabaseConfig()
+        self._db = Database(db_config)
+        self._repo = QueueRepository(self._db)
+        virtual_queues = [
+            VirtualQueue(
+                name=q.name,
+                priority=q.priority,
+                enabled=q.enabled,
+                matchers=[{"type": m.type, "tags": m.tags} for m in q.matchers],
+            )
+            for q in config.queues
+        ]
+        self._queue_manager = QueueManager(self._repo, virtual_queues)
+
     async def start(self) -> None:
         """Start the monitor and begin processing events."""
+        await self._db.connect()
         await self._client.__aenter__()
         await self._monitor.start()
         _LOGGER.info("Conductarr engine started")
@@ -69,6 +91,7 @@ class ConductarrEngine:
         """Stop the monitor and close the client session."""
         await self._monitor.stop()
         await self._client.__aexit__(None, None, None)
+        await self._db.disconnect()
 
     async def _handle_event(self, event: ConductarrEvent) -> None:
         """Dispatch an event to the appropriate handler."""
@@ -87,6 +110,7 @@ class ConductarrEngine:
                     event.slot.nzo_id,
                     event.slot.filename,
                 )
+                await self._queue_manager.on_job_added(event.slot.nzo_id, event.slot)
             case JobRemovedEvent():
                 _LOGGER.info(
                     "Event: %s  nzo_id=%s  filename=%s",
@@ -94,6 +118,7 @@ class ConductarrEngine:
                     event.nzo_id,
                     event.filename,
                 )
+                await self._queue_manager.on_job_removed(event.nzo_id)
             case JobStatusChangedEvent():
                 _LOGGER.info(
                     "Event: %s  nzo_id=%s  %s → %s",

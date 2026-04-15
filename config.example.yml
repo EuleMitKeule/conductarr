@@ -13,3 +13,23 @@ radarr:
 sonarr:
   url: http://sonarr:8989
   api_key: xxx
+
+queues:
+  - name: user_requests
+    priority: 100
+    matchers:
+      - type: tags
+        tags: ["request", "overseerr"]
+
+  - name: german_upgrade
+    priority: 50
+    matchers:
+      - type: tags
+        tags: ["upgrade-de"]
+
+  - name: kometa
+    priority: 10
+    enabled: false
+    matchers:
+      - type: tags
+        tags: ["kometa"]
