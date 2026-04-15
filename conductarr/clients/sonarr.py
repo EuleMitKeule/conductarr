@@ -253,6 +253,62 @@ class SonarrClient:
         return True
 
     # ------------------------------------------------------------------
+    # Tags
+    # ------------------------------------------------------------------
+
+    async def get_tags(self) -> dict[int, str]:
+        """Return a mapping of tag_id → label for all Sonarr tags."""
+        try:
+            raw = cast(list[dict[str, Any]], await self._get_api().tag.get())
+        except PyarrUnauthorizedError as exc:
+            raise SonarrAuthError(str(exc)) from exc
+        except (PyarrConnectionError, ConnectionError, OSError) as exc:
+            raise SonarrConnectionError(str(exc)) from exc
+        except Exception as exc:
+            raise SonarrError(str(exc)) from exc
+        return {t["id"]: t["label"] for t in raw}
+
+    async def get_episode_tags(self, episode_id: int) -> list[str]:
+        """Return tag labels for the parent series of the given episode."""
+        try:
+            ep_raw = cast(
+                dict[str, Any],
+                await self._get_api().episode.get(item_id=episode_id),
+            )
+        except PyarrResourceNotFound:
+            return []
+        except PyarrUnauthorizedError as exc:
+            raise SonarrAuthError(str(exc)) from exc
+        except (PyarrConnectionError, ConnectionError, OSError) as exc:
+            raise SonarrConnectionError(str(exc)) from exc
+        except Exception as exc:
+            raise SonarrError(str(exc)) from exc
+
+        series_id: int = ep_raw.get("seriesId", 0)
+        if not series_id:
+            return []
+
+        try:
+            series_raw = cast(
+                dict[str, Any],
+                await self._get_api().series.get(item_id=series_id),
+            )
+        except PyarrResourceNotFound:
+            return []
+        except PyarrUnauthorizedError as exc:
+            raise SonarrAuthError(str(exc)) from exc
+        except (PyarrConnectionError, ConnectionError, OSError) as exc:
+            raise SonarrConnectionError(str(exc)) from exc
+        except Exception as exc:
+            raise SonarrError(str(exc)) from exc
+
+        tag_ids: list[int] = series_raw.get("tags", [])
+        if not tag_ids:
+            return []
+        tag_map = await self.get_tags()
+        return [tag_map[tid] for tid in tag_ids if tid in tag_map]
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 

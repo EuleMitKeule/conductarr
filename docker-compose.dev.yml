@@ -8,14 +8,8 @@ services:
       UMASK: "022"
       TZ: UTC
       LOG_LEVEL: debug
-      DEV_SAB_INI: /dev/sabnzbd/sabnzbd.ini
-      DEV_RADARR_CONFIG: /dev/radarr/config.xml
-      DEV_SONARR_CONFIG: /dev/sonarr/config.xml
     volumes:
       - ./config-docker:/config
-      - ./dev/sabnzbd/sabnzbd.ini:/dev/sabnzbd/sabnzbd.ini:ro
-      - ./dev/radarr:/dev/radarr:ro
-      - ./dev/sonarr:/dev/sonarr:ro
     command: conductarr watch
     healthcheck:
       test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
@@ -24,61 +18,48 @@ services:
       retries: 10
       start_period: 5s
     depends_on:
-      sabnzbd:
+      mock-sabnzbd:
         condition: service_healthy
-      radarr:
+      mock-radarr:
         condition: service_healthy
-      sonarr:
+      mock-sonarr:
         condition: service_healthy
 
-  sabnzbd:
-    image: lscr.io/linuxserver/sabnzbd:latest
-    container_name: sabnzbd
+  mock-sabnzbd:
+    build: ./tests/mocks
+    container_name: mock-sabnzbd
     environment:
-      PUID: 1000
-      PGID: 1000
-      TZ: UTC
-    volumes:
-      - ./dev/sabnzbd:/config
+      SERVICE: sabnzbd
     ports:
       - "8080:8080"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
-      interval: 3s
-      timeout: 5s
-      retries: 20
-      start_period: 5s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api?mode=version&apikey=sabnzbd-test-key')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
-  radarr:
-    image: lscr.io/linuxserver/radarr:latest
-    container_name: radarr
+  mock-radarr:
+    build: ./tests/mocks
+    container_name: mock-radarr
     environment:
-      PUID: 1000
-      PGID: 1000
-      TZ: UTC
-    volumes:
-      - ./dev/radarr:/config
+      SERVICE: radarr
     ports:
       - "7878:7878"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7878/ping"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7878/api/v3/system/status')"]
+      interval: 5s
+      timeout: 3s
       retries: 10
 
-  sonarr:
-    image: lscr.io/linuxserver/sonarr:latest
-    container_name: sonarr
+  mock-sonarr:
+    build: ./tests/mocks
+    container_name: mock-sonarr
     environment:
-      PUID: 1000
-      PGID: 1000
-      TZ: UTC
-    volumes:
-      - ./dev/sonarr:/config
+      SERVICE: sonarr
     ports:
       - "8989:8989"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8989/ping"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8989/api/v3/system/status')"]
+      interval: 5s
+      timeout: 3s
       retries: 10

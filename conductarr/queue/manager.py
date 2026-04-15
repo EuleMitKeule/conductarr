@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 
-from conductarr.clients.sabnzbd import QueueSlot
+from conductarr.clients.radarr import RadarrClient, RadarrQueueItem
+from conductarr.clients.sabnzbd import Queue, QueueSlot
+from conductarr.clients.sonarr import SonarrClient, SonarrQueueItem
 from conductarr.db.repository import QueueRepository
 from conductarr.queue.matchers import MATCHER_REGISTRY
 from conductarr.queue.models import QueueItem, VirtualQueue
@@ -16,9 +18,15 @@ class QueueManager:
     """Orchestrates virtual queue assignment and SABnzbd job lifecycle."""
 
     def __init__(
-        self, repo: QueueRepository, virtual_queues: list[VirtualQueue]
+        self,
+        repo: QueueRepository,
+        virtual_queues: list[VirtualQueue],
+        radarr_client: RadarrClient | None = None,
+        sonarr_client: SonarrClient | None = None,
     ) -> None:
         self._repo = repo
+        self._radarr = radarr_client
+        self._sonarr = sonarr_client
         self._virtual_queues = sorted(
             [vq for vq in virtual_queues if vq.enabled],
             key=lambda vq: vq.priority,
@@ -54,55 +62,115 @@ class QueueManager:
         return await self._repo.upsert_item(item)
 
     async def on_job_added(self, nzo_id: str, slot: QueueSlot) -> None:
-        """Handle a SABnzbd JobAddedEvent.
-
-        If the slot's category indicates a Radarr/Sonarr download_id,
-        link the SABnzbd job to the corresponding queue item.
-        """
-        download_id = slot.cat if slot.cat else None
-        if not download_id:
-            _LOGGER.debug("Job %s has no category/download_id, skipping map", nzo_id)
-            return
-
-        # Try to find a queue item whose source_id matches the download_id
-        for source in ("radarr", "sonarr"):
-            queue_item = await self._repo.get_item(source, download_id)
-            if queue_item is not None and queue_item.id is not None:
-                await self._repo.upsert_job_map(
-                    nzo_id,
-                    queue_item.id,
-                    queue_item.virtual_queue or "",
-                )
-                _LOGGER.info(
-                    "Mapped SABnzbd job %s → queue item %s (queue=%s)",
-                    nzo_id,
-                    queue_item.id,
-                    queue_item.virtual_queue,
-                )
-                return
-
-        _LOGGER.debug(
-            "No queue item found for download_id=%s (nzo_id=%s)", download_id, nzo_id
-        )
+        """Log a SABnzbd JobAddedEvent. Mapping is handled by reconcile."""
+        _LOGGER.debug("Job added: nzo_id=%s filename=%s", nzo_id, slot.filename)
 
     async def on_job_removed(self, nzo_id: str) -> None:
-        """Handle a SABnzbd JobRemovedEvent.
+        """Log a SABnzbd JobRemovedEvent. Cleanup is handled by reconcile."""
+        _LOGGER.debug("Job removed: nzo_id=%s", nzo_id)
 
-        Marks the linked queue item as completed and removes the job map entry.
+    async def reconcile(
+        self,
+        sab_queue: Queue,
+        radarr_queue: list[RadarrQueueItem],
+        sonarr_queue: list[SonarrQueueItem],
+    ) -> None:
+        """Cross-reference SABnzbd slots with Radarr/Sonarr queue items.
+
+        For each SABnzbd slot whose nzo_id matches a Radarr or Sonarr
+        ``downloadId``, creates or updates the corresponding queue item and
+        records the mapping in ``sabnzbd_job_map``.
+
+        For slots that have disappeared from SABnzbd (job finished/cancelled),
+        marks the linked queue item as completed and removes the mapping.
         """
-        job_map = await self._repo.get_job_map(nzo_id)
-        if job_map is None:
-            _LOGGER.debug("No job map for removed nzo_id=%s", nzo_id)
-            return
+        radarr_by_nzo = {
+            item.download_id: item for item in radarr_queue if item.download_id
+        }
+        sonarr_by_nzo = {
+            item.download_id: item for item in sonarr_queue if item.download_id
+        }
+        current_nzo_ids = {slot.nzo_id for slot in sab_queue.slots}
 
-        queue_item_id = job_map["queue_item_id"]
-        if queue_item_id is not None:
-            await self._repo.update_status(queue_item_id, "completed")
-            _LOGGER.info(
-                "Queue item %d marked completed (nzo_id=%s)", queue_item_id, nzo_id
-            )
+        # Map new slots to queue items
+        for slot in sab_queue.slots:
+            nzo_id = slot.nzo_id
+            if await self._repo.get_job_map(nzo_id) is not None:
+                continue  # already mapped
 
-        await self._repo.delete_job_map(nzo_id)
+            if nzo_id in radarr_by_nzo:
+                radarr_item = radarr_by_nzo[nzo_id]
+                queue_item = await self._repo.get_item(
+                    "radarr", str(radarr_item.movie_id)
+                )
+                if queue_item is None:
+                    tags: list[str] = []
+                    if self._radarr is not None:
+                        tags = await self._radarr.get_movie_tags(radarr_item.movie_id)
+                    queue_item = QueueItem(
+                        source="radarr",
+                        source_id=str(radarr_item.movie_id),
+                        tags=tags,
+                    )
+                queue_item = await self.assign_queue(queue_item)
+                if queue_item.id is not None:
+                    await self._repo.upsert_job_map(
+                        nzo_id, queue_item.id, queue_item.virtual_queue or ""
+                    )
+                    _LOGGER.info(
+                        "Mapped SABnzbd job %s → Radarr movie %s → queue %s",
+                        nzo_id,
+                        radarr_item.title,
+                        queue_item.virtual_queue,
+                    )
+
+            elif nzo_id in sonarr_by_nzo:
+                sonarr_item = sonarr_by_nzo[nzo_id]
+                queue_item = await self._repo.get_item(
+                    "sonarr", str(sonarr_item.episode_id)
+                )
+                if queue_item is None:
+                    tags = []
+                    if self._sonarr is not None:
+                        tags = await self._sonarr.get_episode_tags(
+                            sonarr_item.episode_id
+                        )
+                    queue_item = QueueItem(
+                        source="sonarr",
+                        source_id=str(sonarr_item.episode_id),
+                        tags=tags,
+                    )
+                queue_item = await self.assign_queue(queue_item)
+                if queue_item.id is not None:
+                    await self._repo.upsert_job_map(
+                        nzo_id, queue_item.id, queue_item.virtual_queue or ""
+                    )
+                    _LOGGER.info(
+                        "Mapped SABnzbd job %s → Sonarr episode %s → queue %s",
+                        nzo_id,
+                        sonarr_item.title,
+                        queue_item.virtual_queue,
+                    )
+
+            else:
+                _LOGGER.debug(
+                    "SABnzbd job %s not found in Radarr or Sonarr queue", nzo_id
+                )
+
+        # Mark completed jobs whose nzo_ids are no longer in SABnzbd
+        all_maps = await self._repo.get_all_job_maps()
+        for job_map in all_maps:
+            nzo_id = job_map["nzo_id"]
+            if nzo_id not in current_nzo_ids:
+                queue_item_id = job_map["queue_item_id"]
+                if queue_item_id is not None:
+                    await self._repo.update_status(queue_item_id, "completed")
+                    _LOGGER.info(
+                        "SABnzbd job %s completed → queue item %d marked completed",
+                        nzo_id,
+                        queue_item_id,
+                    )
+                await self._repo.delete_job_map(nzo_id)
 
     async def get_next_for_queue(self, virtual_queue: str) -> QueueItem | None:
         """Return the next pending item for a virtual queue using rotation order."""

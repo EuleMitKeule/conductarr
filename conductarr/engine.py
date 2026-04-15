@@ -63,6 +63,7 @@ class ConductarrEngine:
             sonarr_client=self._sonarr_client,
             poll_interval=config.poll_interval,
             on_event=self._handle_event,
+            on_cycle_complete=self._on_cycle_complete,
         )
 
         # Database and queue management
@@ -78,12 +79,21 @@ class ConductarrEngine:
             )
             for q in config.queues
         ]
-        self._queue_manager = QueueManager(self._repo, virtual_queues)
+        self._queue_manager = QueueManager(
+            self._repo,
+            virtual_queues,
+            radarr_client=self._radarr_client,
+            sonarr_client=self._sonarr_client,
+        )
+
+    async def connect(self) -> None:
+        """Connect the database and HTTP client without starting the watch loop."""
+        await self._db.connect()
+        await self._client.__aenter__()
 
     async def start(self) -> None:
         """Start the monitor and begin processing events."""
-        await self._db.connect()
-        await self._client.__aenter__()
+        await self.connect()
         await self._monitor.start()
         _LOGGER.info("Conductarr engine started")
 
@@ -92,6 +102,23 @@ class ConductarrEngine:
         await self._monitor.stop()
         await self._client.__aexit__(None, None, None)
         await self._db.disconnect()
+
+    async def poll_once(self) -> None:
+        """Run exactly one poll cycle (for integration tests)."""
+        await self._monitor._poll()
+
+    @property
+    def repo(self) -> QueueRepository:
+        """Expose the repository for test introspection."""
+        return self._repo
+
+    async def _on_cycle_complete(self) -> None:
+        """Called by the monitor after every successful poll cycle."""
+        sab = self._monitor.last_sab_queue
+        radarr = self._monitor.last_radarr_queue
+        sonarr = self._monitor.last_sonarr_queue
+        if sab is not None and radarr is not None and sonarr is not None:
+            await self._queue_manager.reconcile(sab, radarr, sonarr)
 
     async def _handle_event(self, event: ConductarrEvent) -> None:
         """Dispatch an event to the appropriate handler."""

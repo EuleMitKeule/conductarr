@@ -42,3 +42,13 @@ dev = [
     "ruff>=0.15.9",
     "types-pyyaml>=6.0.12.20250915",
 ]
+
+[tool.mypy]
+# These files run inside Docker containers and import packages (fastapi, uvicorn)
+# that are not installed in the host virtual environment.
+exclude = [
+    "tests/mocks/main\\.py",
+    "tests/mocks/sabnzbd/app\\.py",
+    "tests/mocks/radarr/app\\.py",
+    "tests/mocks/sonarr/app\\.py",
+]

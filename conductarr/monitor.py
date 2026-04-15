@@ -43,15 +43,20 @@ class SabnzbdMonitor:
         sonarr_client: SonarrClient,
         poll_interval: float,
         on_event: Callable[[ConductarrEvent], Awaitable[None]],
+        on_cycle_complete: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._client = client
         self._radarr_client = radarr_client
         self._sonarr_client = sonarr_client
         self._poll_interval = poll_interval
         self._on_event = on_event
+        self._on_cycle_complete = on_cycle_complete
         self._previous_queue: Queue | None = None
         self._previous_radarr: list[RadarrQueueItem] | None = None
         self._previous_sonarr: list[SonarrQueueItem] | None = None
+        self.last_sab_queue: Queue | None = None
+        self.last_radarr_queue: list[RadarrQueueItem] | None = None
+        self.last_sonarr_queue: list[SonarrQueueItem] | None = None
         self._task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
@@ -70,49 +75,61 @@ class SabnzbdMonitor:
 
     async def _run(self) -> None:
         while True:
-            now = datetime.now(tz=timezone.utc)
-
-            sab_result, radarr_result, sonarr_result = await asyncio.gather(
-                self._poll_sabnzbd(),
-                self._poll_radarr(),
-                self._poll_sonarr(),
-                return_exceptions=True,
-            )
-
-            if isinstance(sab_result, BaseException):
-                await self._on_event(
-                    ServiceUnavailableEvent(
-                        timestamp=now,
-                        service="sabnzbd",
-                        error=str(sab_result),
-                    )
-                )
-            else:
-                await self._diff_sabnzbd(sab_result, now)
-
-            if isinstance(radarr_result, BaseException):
-                await self._on_event(
-                    ServiceUnavailableEvent(
-                        timestamp=now,
-                        service="radarr",
-                        error=str(radarr_result),
-                    )
-                )
-            else:
-                await self._diff_radarr(radarr_result, now)
-
-            if isinstance(sonarr_result, BaseException):
-                await self._on_event(
-                    ServiceUnavailableEvent(
-                        timestamp=now,
-                        service="sonarr",
-                        error=str(sonarr_result),
-                    )
-                )
-            else:
-                await self._diff_sonarr(sonarr_result, now)
-
+            await self._poll()
             await asyncio.sleep(self._poll_interval)
+
+    async def _poll(self) -> None:
+        """Run a single poll cycle: fetch all queues, emit diff events,
+        update ``last_*`` snapshot attributes, and invoke the
+        ``on_cycle_complete`` callback when all three fetches succeed.
+        """
+        now = datetime.now(tz=timezone.utc)
+
+        sab_result, radarr_result, sonarr_result = await asyncio.gather(
+            self._poll_sabnzbd(),
+            self._poll_radarr(),
+            self._poll_sonarr(),
+            return_exceptions=True,
+        )
+
+        if isinstance(sab_result, BaseException):
+            await self._on_event(
+                ServiceUnavailableEvent(
+                    timestamp=now,
+                    service="sabnzbd",
+                    error=str(sab_result),
+                )
+            )
+        else:
+            self.last_sab_queue = sab_result
+            await self._diff_sabnzbd(sab_result, now)
+
+        if isinstance(radarr_result, BaseException):
+            await self._on_event(
+                ServiceUnavailableEvent(
+                    timestamp=now,
+                    service="radarr",
+                    error=str(radarr_result),
+                )
+            )
+        else:
+            self.last_radarr_queue = radarr_result
+            await self._diff_radarr(radarr_result, now)
+
+        if isinstance(sonarr_result, BaseException):
+            await self._on_event(
+                ServiceUnavailableEvent(
+                    timestamp=now,
+                    service="sonarr",
+                    error=str(sonarr_result),
+                )
+            )
+        else:
+            self.last_sonarr_queue = sonarr_result
+            await self._diff_sonarr(sonarr_result, now)
+
+        if self._on_cycle_complete is not None:
+            await self._on_cycle_complete()
 
     # ------------------------------------------------------------------
     # Poll helpers (fetch only — may raise)

@@ -1,12 +1,10 @@
-"""Example flow: exercise SABnzbd, Radarr, and Sonarr dev stack."""
+"""Example flow: exercise mock SABnzbd, Radarr, and Sonarr via control clients."""
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import os
 import sys
-import time
 from pathlib import Path
 
 import aiohttp
@@ -14,15 +12,19 @@ import aiohttp
 # Allow running from the repo root without installing the package.
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from conductarr.clients.radarr import RadarrClient
 from conductarr.clients.sabnzbd import SABnzbdClient
-from conductarr.clients.sonarr import SonarrClient
-from tests.integration.clients.test_sabnzbd import MINIMAL_TEST_NZB
+from tests.mocks.control_client import (
+    RadarrControlClient,
+    SABnzbdControlClient,
+    SonarrControlClient,
+)
 
 
 async def wait_for_service(url: str, name: str, *, timeout: int = 120) -> None:
     """Poll a service URL until it responds or *timeout* seconds elapse."""
     base = url.rstrip("/")
+    import time
+
     deadline = time.monotonic() + timeout
     attempt = 0
     while True:
@@ -45,83 +47,101 @@ async def wait_for_service(url: str, name: str, *, timeout: int = 120) -> None:
 
 async def main() -> None:
     sab_url = os.environ.get("SABNZBD_URL", "http://localhost:8080")
-    sab_key = os.environ.get("SABNZBD_API_KEY", "")
+    sab_key = os.environ.get("SABNZBD_API_KEY", "sabnzbd-test-key")
     radarr_url = os.environ.get("RADARR_URL", "http://localhost:7878")
-    radarr_key = os.environ.get("RADARR_API_KEY", "")
     sonarr_url = os.environ.get("SONARR_URL", "http://localhost:8989")
-    sonarr_key = os.environ.get("SONARR_API_KEY", "")
 
+    # Wait for services to be available
     await wait_for_service(sab_url, "SABnzbd")
 
-    # ---- SABnzbd ----
-    async with SABnzbdClient(url=sab_url, api_key=sab_key) as client:
-        version = await client.version()
+    # Control clients for orchestrating the scenario
+    sab_ctrl = SABnzbdControlClient(sab_url)
+    radarr_ctrl = RadarrControlClient(radarr_url)
+    sonarr_ctrl = SonarrControlClient(sonarr_url)
+
+    # 1. Reset all mocks
+    await sab_ctrl.reset()
+    await radarr_ctrl.reset()
+    await sonarr_ctrl.reset()
+    print("All mocks reset.")
+
+    # 2. Print versions from all three services
+    async with SABnzbdClient(url=sab_url, api_key=sab_key) as sab_client:
+        version = await sab_client.version()
         print(f"SABnzbd version: {version}")
 
-        queue = await client.get_queue()
-        print(f"SABnzbd queue — paused: {queue.paused}, slots: {queue.noofslots}")
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{radarr_url}/api/v3/system/status") as resp:
+            radarr_status = await resp.json()
+            print(f"Radarr version: {radarr_status['version']}")
 
-        # Upload minimal test NZB
-        nzb_bytes = base64.b64decode(MINIMAL_TEST_NZB)
-        base_url = sab_url.rstrip("/")
-        async with aiohttp.ClientSession() as session:
-            form = aiohttp.FormData()
-            form.add_field(
-                "name",
-                nzb_bytes,
-                filename="conductarr-test.nzb",
-                content_type="application/x-nzb",
-            )
-            async with session.post(
-                f"{base_url}/api",
-                params={"mode": "addfile", "output": "json", "apikey": sab_key},
-                data=form,
-            ) as resp:
-                upload_result = await resp.json()
+        async with session.get(f"{sonarr_url}/api/v3/system/status") as resp:
+            sonarr_status = await resp.json()
+            print(f"Sonarr version: {sonarr_status['version']}")
 
-        assert upload_result.get("status") is True, f"Upload failed: {upload_result}"
-        nzo_id: str = upload_result["nzo_ids"][0]
-        print(f"Uploaded NZB — nzo_id: {nzo_id}")
+    # 3. Simulate a user request
+    movie = await radarr_ctrl.add_movie(
+        title="The Matrix", tmdb_id=603, tags=["request"]
+    )
+    print(
+        f"Added movie: {movie['title']} (id={movie['id']}, tags={movie.get('tags', [])})"
+    )
 
-        await asyncio.sleep(2)
-        queue = await client.get_queue()
-        print(f"Queue after upload — paused: {queue.paused}, slots: {queue.noofslots}")
+    nzo_id = await sab_ctrl.start_job(
+        filename="The.Matrix.1999.1080p.BluRay.nzb", cat="movies"
+    )
+    print(f"Started SABnzbd job: {nzo_id}")
+
+    await radarr_ctrl.release_movie(tmdb_id=603, nzo_id=nzo_id)
+
+    async with SABnzbdClient(url=sab_url, api_key=sab_key) as sab_client:
+        queue = await sab_client.get_queue()
+        print(f"SABnzbd queue — slots: {queue.noofslots}")
         for slot in queue.slots:
             print(
                 f"  nzo_id={slot.nzo_id}  filename={slot.filename}"
                 f"  status={slot.status}  priority={slot.priority}"
             )
 
-        deleted = await client.delete_job(nzo_id, del_files=True)
-        print(f"Deleted {nzo_id}: {deleted}")
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            f"{radarr_url}/api/v3/queue",
+            params={"pageSize": 100},
+            headers={"X-Api-Key": os.environ.get("RADARR_API_KEY", "radarr-test-key")},
+        ) as resp:
+            radarr_queue = await resp.json()
+            print(f"Radarr queue — records: {len(radarr_queue.get('records', []))}")
+            for rec in radarr_queue.get("records", []):
+                print(
+                    f"  downloadId={rec.get('downloadId')}  title={rec.get('title')}"
+                    f"  status={rec.get('status')}"
+                )
 
-    # ---- Radarr ----
-    radarr = RadarrClient(url=radarr_url, api_key=radarr_key)
-    try:
-        radarr_queue = await radarr.get_queue()
-        print(f"Radarr queue items: {len(radarr_queue)}")
-    except Exception as exc:
-        print(f"Radarr queue error: {exc}")
+    # 4. Wait for Conductarr to poll and reconcile
+    print("Waiting 5 seconds for Conductarr to poll and reconcile…")
+    await asyncio.sleep(5)
 
-    try:
-        movies = await radarr.get_movies()
-        print(f"Radarr total movies: {len(movies)}")
-    except Exception as exc:
-        print(f"Radarr movies error: {exc}")
+    # 5. Check Radarr mock state to confirm the nzo_id linkage survived the poll
+    state = await radarr_ctrl.get_state()
+    queue_entries = state.get("queue", {})
+    linked = [q for q in queue_entries.values() if q.get("download_id") == nzo_id]
+    if linked:
+        print(f"Reconcile confirmed: Radarr queue entry linked to nzo_id={nzo_id}")
+    else:
+        print(f"Warning: no Radarr queue entry found for nzo_id={nzo_id}")
 
-    # ---- Sonarr ----
-    sonarr = SonarrClient(url=sonarr_url, api_key=sonarr_key)
-    try:
-        sonarr_queue = await sonarr.get_queue()
-        print(f"Sonarr queue items: {len(sonarr_queue)}")
-    except Exception as exc:
-        print(f"Sonarr queue error: {exc}")
+    # 6. Finish the job
+    await sab_ctrl.finish_job(nzo_id)
+    await radarr_ctrl.finish_movie(tmdb_id=603)
+    print("Finished SABnzbd job and Radarr movie.")
 
-    try:
-        series = await sonarr.get_series()
-        print(f"Sonarr total series: {len(series)}")
-    except Exception as exc:
-        print(f"Sonarr series error: {exc}")
+    # 7. Wait for Conductarr to reconcile the completion
+    print("Waiting 5 seconds for Conductarr to reconcile completion…")
+    await asyncio.sleep(5)
+
+    async with SABnzbdClient(url=sab_url, api_key=sab_key) as sab_client:
+        queue = await sab_client.get_queue()
+        print(f"SABnzbd queue after finish — slots: {queue.noofslots}")
 
     print("Done.")
 

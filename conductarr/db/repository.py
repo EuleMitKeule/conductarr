@@ -133,6 +133,19 @@ class QueueRepository:
             "DELETE FROM sabnzbd_job_map WHERE nzo_id = ?", (nzo_id,)
         )
 
+    async def get_all_job_maps(self) -> list[dict[str, Any]]:
+        """Return all SABnzbd job mappings."""
+        rows = await self._db.fetchall("SELECT * FROM sabnzbd_job_map")
+        return [
+            {
+                "nzo_id": row[0],
+                "queue_item_id": row[1],
+                "virtual_queue": row[2],
+                "detected_at": row[3],
+            }
+            for row in rows
+        ]
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------

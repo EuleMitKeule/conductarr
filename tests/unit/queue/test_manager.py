@@ -88,10 +88,10 @@ class TestAssignQueue:
 class TestOnJobRemoved:
     """Tests for QueueManager.on_job_removed."""
 
-    async def test_marks_item_completed(self, repo: QueueRepository) -> None:
+    async def test_is_noop(self, repo: QueueRepository) -> None:
+        """on_job_removed is now a thin logger; reconcile handles cleanup."""
         manager = _make_manager(repo)
 
-        # Create and persist an item
         item = QueueItem(
             source="radarr",
             source_id="movie-10",
@@ -100,21 +100,18 @@ class TestOnJobRemoved:
         )
         saved = await repo.upsert_item(item)
         assert saved.id is not None
-
-        # Create a job map linking nzo_id to the queue item
         await repo.upsert_job_map("nzo_abc123", saved.id, "user_requests")
 
-        # Simulate job removal
+        # Should not raise and should not modify state
         await manager.on_job_removed("nzo_abc123")
 
-        # Verify the item is now completed
+        # Item and job map remain unchanged (cleanup is done by reconcile)
         updated = await repo.get_item("radarr", "movie-10")
         assert updated is not None
-        assert updated.status == "completed"
+        assert updated.status == "downloading"
 
-        # Verify the job map was deleted
         job_map = await repo.get_job_map("nzo_abc123")
-        assert job_map is None
+        assert job_map is not None
 
     async def test_no_job_map_is_noop(self, repo: QueueRepository) -> None:
         manager = _make_manager(repo)

@@ -189,6 +189,43 @@ class RadarrClient:
         return True
 
     # ------------------------------------------------------------------
+    # Tags
+    # ------------------------------------------------------------------
+
+    async def get_tags(self) -> dict[int, str]:
+        """Return a mapping of tag_id → label for all Radarr tags."""
+        try:
+            raw = cast(list[dict[str, Any]], await self._get_api().tag.get())
+        except PyarrUnauthorizedError as exc:
+            raise RadarrAuthError(str(exc)) from exc
+        except (PyarrConnectionError, ConnectionError, OSError) as exc:
+            raise RadarrConnectionError(str(exc)) from exc
+        except Exception as exc:
+            raise RadarrError(str(exc)) from exc
+        return {t["id"]: t["label"] for t in raw}
+
+    async def get_movie_tags(self, movie_id: int) -> list[str]:
+        """Return tag labels for the given movie."""
+        try:
+            raw = cast(
+                dict[str, Any], await self._get_api().movie.get(item_id=movie_id)
+            )
+        except PyarrResourceNotFound:
+            return []
+        except PyarrUnauthorizedError as exc:
+            raise RadarrAuthError(str(exc)) from exc
+        except (PyarrConnectionError, ConnectionError, OSError) as exc:
+            raise RadarrConnectionError(str(exc)) from exc
+        except Exception as exc:
+            raise RadarrError(str(exc)) from exc
+
+        tag_ids: list[int] = raw.get("tags", [])
+        if not tag_ids:
+            return []
+        tag_map = await self.get_tags()
+        return [tag_map[tid] for tid in tag_ids if tid in tag_map]
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
