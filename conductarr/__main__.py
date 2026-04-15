@@ -4,6 +4,7 @@ Defines the Typer CLI application and top-level commands. Serves as the
 main execution point when Conductarr is invoked from the command line.
 """
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Annotated
@@ -116,13 +117,29 @@ def watch(
 ) -> None:
     """Start continuous watch mode.
 
-    Monitors the source library for changes and keeps symlinks up to date
-    without requiring manual rescans.
+    Monitors SABnzbd and orchestrates the download queue based on configured
+    priority rules.
     """
-    _config = _init_config(
+    config = _init_config(
         config_dir, config_file_name, log_level, log_dir, log_file_name
     )
+
+    from conductarr.engine import ConductarrEngine
+
+    engine = ConductarrEngine(config)
+
+    async def _run() -> None:
+        await engine.start()
+        try:
+            await asyncio.sleep(float("inf"))
+        finally:
+            await engine.stop()
+
     _LOGGER.info("Starting watch mode")
+    try:
+        asyncio.run(_run())
+    except KeyboardInterrupt:
+        pass
 
 
 @app.command("paths", help="Print all writable paths from config, one per line.")

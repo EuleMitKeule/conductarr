@@ -5,6 +5,7 @@ Handles loading, parsing, and validation of conductarr configuration.
 
 import logging
 import os
+import re
 import sys
 import zoneinfo
 from enum import Enum
@@ -13,7 +14,7 @@ from typing import Any, ClassVar, Literal
 
 import typer
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from conductarr.const import (
     APP_NAME,
@@ -39,12 +40,15 @@ from conductarr.const import (
     DEFAULT_LOG_ROTATION_MAX_BYTES,
     DEFAULT_LOG_ROTATION_ROTATE_ON_START,
     DEFAULT_PGID,
+    DEFAULT_POLL_INTERVAL,
     DEFAULT_PUID,
     DEFAULT_TZ,
     DEFAULT_UMASK,
+    ENV_DEV_SAB_INI,
     ENV_PREFIX_GENERAL,
     ENV_PREFIX_LOG_ROTATION,
     ENV_PREFIX_LOGGING,
+    ENV_PREFIX_SABNZBD,
     DatabaseType,
     LogLevel,
 )
@@ -53,6 +57,7 @@ __all__ = [
     "AnyDatabaseConfig",
     "DatabaseType",
     "MemoryDatabaseConfig",
+    "SabnzbdConfig",
     "SQLiteDatabaseConfig",
 ]
 
@@ -212,6 +217,78 @@ class SQLiteDatabaseConfig(BaseModel):
 AnyDatabaseConfig = MemoryDatabaseConfig | SQLiteDatabaseConfig
 
 
+# ---------------------------------------------------------------------------
+# SABnzbd / engine configuration
+# ---------------------------------------------------------------------------
+
+
+def _read_sabnzbd_ini(path: Path) -> dict[str, str]:
+    """Extract key settings from a SABnzbd ini file.
+
+    Returns a dict with any of the keys ``api_key``, ``port``, ``host``
+    that are present in the file's ``[misc]`` section.
+    """
+    content = path.read_text(encoding="utf-8")
+    result: dict[str, str] = {}
+    for key in ("api_key", "port", "host"):
+        m = re.search(rf"^{key}\s*=\s*(.+)$", content, re.MULTILINE)
+        if m:
+            result[key] = m.group(1).strip()
+    return result
+
+
+class SabnzbdConfig(BaseModel):
+    """SABnzbd client sub-configuration.
+
+    Auto-discovered from the ``sabnzbd:`` section in ``conductarr.yml``::
+
+        sabnzbd:
+          url: http://localhost:8080
+          api_key: your_api_key
+          poll_interval: 15.0   # optional, default 15.0
+
+    Dev mode:
+        Set the ``DEV_SAB_INI`` environment variable to the path of a
+        mounted ``sabnzbd.ini`` file.  When set, any missing ``url`` or
+        ``api_key`` values are automatically populated from the ini.
+        Explicit config always takes precedence.
+    """
+
+    _env_prefix: ClassVar[str] = ENV_PREFIX_SABNZBD
+
+    url: str = Field(default="")
+    api_key: str = Field(default="")
+    poll_interval: float = Field(default=DEFAULT_POLL_INTERVAL)
+
+    @model_validator(mode="after")
+    def _fill_from_dev_ini(self) -> "SabnzbdConfig":
+        """When ``DEV_SAB_INI`` is set, fill in missing url/api_key from the ini."""
+        dev_ini_str = os.environ.get(ENV_DEV_SAB_INI)
+        if not dev_ini_str:
+            return self
+
+        dev_ini_path = Path(dev_ini_str)
+        if not dev_ini_path.is_file():
+            _LOGGER.warning("DEV_SAB_INI='%s' does not exist, ignoring", dev_ini_path)
+            return self
+
+        _LOGGER.warning(
+            "Dev mode active: reading SABnzbd settings from '%s'",
+            dev_ini_path,
+        )
+        ini = _read_sabnzbd_ini(dev_ini_path)
+
+        if not self.url and "port" in ini:
+            port = ini.get("port", "8080")
+            object.__setattr__(self, "url", f"http://sabnzbd:{port}")
+            _LOGGER.debug("Dev mode: url set to '%s' from ini port", self.url)
+        if not self.api_key and "api_key" in ini:
+            object.__setattr__(self, "api_key", ini["api_key"])
+            _LOGGER.debug("Dev mode: api_key loaded from ini")
+
+        return self
+
+
 class Config(BaseModel):
     """conductarr root configuration."""
 
@@ -219,6 +296,7 @@ class Config(BaseModel):
     config_file: str
     general: GeneralConfig
     logging: LoggingConfig
+    sabnzbd: SabnzbdConfig = Field(default_factory=SabnzbdConfig)
     database: AnyDatabaseConfig = Field(
         default_factory=SQLiteDatabaseConfig, discriminator="type"
     )
@@ -367,15 +445,6 @@ def load_config(
         sub_configs[field_name] = sub_merged
 
     extra_fields: dict[str, Any] = {}
-    probers_raw = yaml_data.get("probers")
-    if probers_raw is not None:
-        extra_fields["probers"] = probers_raw
-    pre_probe_raw = yaml_data.get("pre_probe_filters")
-    if pre_probe_raw is not None:
-        extra_fields["pre_probe_filters"] = pre_probe_raw
-    triggers_raw = yaml_data.get("triggers")
-    if triggers_raw is not None:
-        extra_fields["triggers"] = triggers_raw
     output_path_raw = yaml_data.get("output_path")
     if output_path_raw is not None:
         extra_fields["output_path"] = output_path_raw

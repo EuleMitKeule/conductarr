@@ -3,47 +3,51 @@
     "tasks": [
         {
             "label": "Dev Flow",
-            "dependsOn": [
-                "Start Dev Stack",
-                "Run Example Flow"
-            ],
-            "dependsOrder": "parallel",
+            "dependsOn": ["Reset SABnzbd", "Start App"],
+            "dependsOrder": "sequence",
             "group": {
                 "kind": "build",
                 "isDefault": true
-            },
+            }
+        },
+        {
+            "label": "Start App",
+            "dependsOn": ["Start Dev Stack", "Run Example Flow"],
+            "dependsOrder": "parallel"
+        },
+        {
+            "label": "Reset SABnzbd",
+            "type": "shell",
+            "command": "powershell -ExecutionPolicy Bypass -File scripts/reset_sabnzbd.ps1",
             "presentation": {
-                "panel": "shared"
+                "panel": "dedicated",
+                "reveal": "always",
+                "group": "sab"
             }
         },
         {
             "label": "Start Dev Stack",
             "type": "shell",
             "command": "docker compose -f docker-compose.dev.yml up --build",
-            "group": "build",
             "presentation": {
                 "panel": "dedicated",
                 "reveal": "always",
-                "group": "dev-flow"
+                "group": "main"
             }
         },
         {
             "label": "Stop Dev Stack",
             "type": "shell",
-            "command": "docker compose -f docker-compose.dev.yml down",
-            "presentation": {
-                "panel": "shared"
-            }
+            "command": "docker compose -f docker-compose.dev.yml down"
         },
         {
             "label": "Run Example Flow",
             "type": "shell",
-            "command": "uv run python scripts/example_flow.py",
-            "group": "build",
+            "command": "powershell -ExecutionPolicy Bypass -File scripts/run_example_flow.ps1",
             "presentation": {
                 "panel": "dedicated",
                 "reveal": "always",
-                "group": "dev-flow"
+                "group": "main"
             }
         }
     ]

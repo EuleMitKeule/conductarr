@@ -8,9 +8,20 @@ services:
       UMASK: "022"
       TZ: UTC
       LOG_LEVEL: debug
+      DEV_SAB_INI: /sabnzbd.ini
     volumes:
       - ./config-docker:/config
+      - ./dev/sabnzbd/sabnzbd.ini:/sabnzbd.ini:ro
     command: conductarr watch
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    depends_on:
+      sabnzbd:
+        condition: service_healthy
 
   sabnzbd:
     image: lscr.io/linuxserver/sabnzbd:latest
@@ -25,7 +36,7 @@ services:
       - "8080:8080"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/"]
-      interval: 15s
+      interval: 3s
       timeout: 5s
-      retries: 10
-      start_period: 30s
+      retries: 20
+      start_period: 5s

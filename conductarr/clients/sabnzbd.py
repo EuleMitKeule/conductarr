@@ -191,8 +191,17 @@ class SABnzbdClient:
             raise SABnzbdInvalidAPIKeyError("API key was rejected by SABnzbd")
         if stripped == "API Key Required":
             raise SABnzbdMissingAPIKeyError("SABnzbd requires an API key")
+        if not stripped:
+            raise SABnzbdConnectionError(
+                "SABnzbd returned an empty response (likely a refused hostname)"
+            )
 
-        data: Any = _loads(text)
+        try:
+            data: Any = _loads(text)
+        except Exception as exc:
+            raise SABnzbdConnectionError(
+                f"SABnzbd returned non-JSON response: {text[:200]!r}"
+            ) from exc
 
         if isinstance(data, dict) and "error" in data:
             raise SABnzbdError(data["error"])
