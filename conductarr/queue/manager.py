@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from conductarr.clients.radarr import RadarrClient, RadarrQueueItem
-from conductarr.clients.sabnzbd import Queue, QueueSlot
+from conductarr.clients.sabnzbd import Queue, QueueSlot, SABnzbdClient
 from conductarr.clients.sonarr import SonarrClient, SonarrQueueItem
 from conductarr.db.repository import QueueRepository
 from conductarr.queue.matchers import MATCHER_REGISTRY
@@ -23,10 +23,12 @@ class QueueManager:
         virtual_queues: list[VirtualQueue],
         radarr_client: RadarrClient | None = None,
         sonarr_client: SonarrClient | None = None,
+        sabnzbd_client: SABnzbdClient | None = None,
     ) -> None:
         self._repo = repo
         self._radarr = radarr_client
         self._sonarr = sonarr_client
+        self._sabnzbd = sabnzbd_client
         self._virtual_queues = sorted(
             [vq for vq in virtual_queues if vq.enabled],
             key=lambda vq: vq.priority,
@@ -172,6 +174,9 @@ class QueueManager:
                     )
                 await self._repo.delete_job_map(nzo_id)
 
+        # Reorder queue by virtual-queue priority and enforce one active download.
+        await self._reorder_and_enforce_active(sab_queue)
+
     async def get_next_for_queue(self, virtual_queue: str) -> QueueItem | None:
         """Return the next pending item for a virtual queue using rotation order."""
         items = await self._repo.get_items_by_queue(virtual_queue)
@@ -184,3 +189,72 @@ class QueueManager:
         """Increment attempts and set status back to pending for retry."""
         await self._repo.increment_attempts(item_id)
         await self._repo.update_status(item_id, "pending")
+
+    async def _reorder_and_enforce_active(self, sab_queue: Queue) -> None:
+        """Reorder SABnzbd queue by virtual queue priority and enforce one active download.
+
+        Slots belonging to higher-priority virtual queues are moved to the front.
+        Unknown / unmapped jobs are pushed to the back.  The operation is idempotent:
+        ``switch()`` is only called when the current order differs from the desired one.
+        After reordering, exactly slot[0] is allowed to download; all other slots are
+        individually paused.
+        """
+        if self._sabnzbd is None or not sab_queue.slots:
+            return
+
+        # Build priority rank: lower number = higher priority (index in sorted list).
+        vq_rank: dict[str, int] = {
+            vq.name: i for i, vq in enumerate(self._virtual_queues)
+        }
+        unknown_rank = len(self._virtual_queues)
+
+        # Fetch all job maps for O(1) nzo_id → virtual_queue lookup.
+        all_maps = await self._repo.get_all_job_maps()
+        nzo_to_vq: dict[str, str] = {m["nzo_id"]: m["virtual_queue"] for m in all_maps}
+
+        # Sort slots: primary by virtual-queue rank, secondary by current index (stable).
+        current_slots = sorted(sab_queue.slots, key=lambda s: s.index)
+        desired_order = [
+            s.nzo_id
+            for s in sorted(
+                current_slots,
+                key=lambda s: (
+                    vq_rank.get(nzo_to_vq.get(s.nzo_id, ""), unknown_rank),
+                    s.index,
+                ),
+            )
+        ]
+        current_order = [s.nzo_id for s in current_slots]
+
+        # Reorder only when the queue is out of desired order (idempotent).
+        if desired_order != current_order:
+            live_order = list(current_order)
+            for i, target_id in enumerate(desired_order):
+                if live_order[i] == target_id:
+                    continue
+                # Move target_id to directly above the job currently at position i.
+                current_at_i = live_order[i]
+                await self._sabnzbd.switch(target_id, current_at_i)
+                j = live_order.index(target_id)
+                live_order.pop(j)
+                live_order.insert(i, target_id)
+                _LOGGER.debug(
+                    "Reorder: moved %s above %s (position %d)",
+                    target_id,
+                    current_at_i,
+                    i,
+                )
+
+        # Enforce exactly one active download: slot[0] runs, all others are paused.
+        slot_by_id = {s.nzo_id: s for s in sab_queue.slots}
+        top_id = desired_order[0]
+        top_slot = slot_by_id.get(top_id)
+        if top_slot is not None and top_slot.status == "Paused":
+            _LOGGER.info("Resuming top slot %s", top_id)
+            await self._sabnzbd.resume_job(top_id)
+
+        for nzo_id in desired_order[1:]:
+            slot = slot_by_id.get(nzo_id)
+            if slot is not None and slot.status != "Paused":
+                _LOGGER.info("Pausing non-top slot %s", nzo_id)
+                await self._sabnzbd.pause_job(nzo_id)

@@ -84,6 +84,7 @@ class ConductarrEngine:
             virtual_queues,
             radarr_client=self._radarr_client,
             sonarr_client=self._sonarr_client,
+            sabnzbd_client=self._client,
         )
 
     async def connect(self) -> None:

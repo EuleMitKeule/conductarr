@@ -31,11 +31,13 @@ class SABnzbdState:
         self.jobs: dict[str, MockJob] = {}
         self.queue_paused: bool = False
         self._counter: int = 0
+        self.switch_call_count: int = 0
 
     def reset(self) -> None:
         self.jobs.clear()
         self.queue_paused = False
         self._counter = 0
+        self.switch_call_count = 0
 
     def generate_nzo_id(self) -> str:
         self._counter += 1
@@ -108,6 +110,7 @@ class SABnzbdState:
         return {"position": position}
 
     def switch_jobs(self, nzo_id: str, other_nzo_id: str) -> dict[str, Any]:
+        self.switch_call_count += 1
         if nzo_id not in self.jobs or other_nzo_id not in self.jobs:
             return {"result": [0, 0]}
         job = self.jobs[nzo_id]
@@ -184,4 +187,5 @@ class SABnzbdState:
             },
             "queue_paused": self.queue_paused,
             "counter": self._counter,
+            "switch_call_count": self.switch_call_count,
         }
