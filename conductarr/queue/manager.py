@@ -207,7 +207,13 @@ class QueueManager:
         After reordering, exactly slot[0] is allowed to download; all other slots are
         individually paused.
         """
-        if self._sabnzbd is None or not sab_queue.slots:
+        if self._sabnzbd is None:
+            return
+
+        # Fetch a fresh queue so slot positions and statuses reflect any reordering
+        # that may have happened earlier in the same reconcile cycle (e.g. switch calls).
+        sab_queue = await self._sabnzbd.get_queue()
+        if not sab_queue.slots:
             return
 
         # Build priority rank: lower number = higher priority (index in sorted list).

@@ -247,6 +247,7 @@ class TestReorderAndEnforceActive:
         slot_top = _make_slot("nzo-top", index=0, status="Downloading")
         slot_verifying = _make_slot("nzo-verifying", index=1, status="Verifying")
         sab_queue = _make_queue(slot_top, slot_verifying)
+        sabnzbd.get_queue = AsyncMock(return_value=sab_queue)
 
         # Map both slots so the manager can look them up
         item_top = await repo.upsert_item(
@@ -285,6 +286,7 @@ class TestReorderAndEnforceActive:
         slot_top = _make_slot("nzo-top", index=0, status="Downloading")
         slot_queued = _make_slot("nzo-queued", index=1, status="Queued")
         sab_queue = _make_queue(slot_top, slot_queued)
+        sabnzbd.get_queue = AsyncMock(return_value=sab_queue)
 
         item_top = await repo.upsert_item(
             QueueItem(
@@ -322,6 +324,7 @@ class TestReorderAndEnforceActive:
         slot_top = _make_slot("nzo-top", index=0, status="Downloading")
         slot_extracting = _make_slot("nzo-extract", index=1, status="Extracting")
         sab_queue = _make_queue(slot_top, slot_extracting)
+        sabnzbd.get_queue = AsyncMock(return_value=sab_queue)
 
         item_top = await repo.upsert_item(
             QueueItem(
