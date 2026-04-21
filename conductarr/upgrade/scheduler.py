@@ -480,16 +480,7 @@ def _filter_releases(
     - ``custom_format``: release must have a custom format with this name.
     - ``custom_format_min_score``: release ``custom_format_score >= value``.
     """
-    result = []
-    for release in releases:
-        if not release.download_allowed:
-            _LOGGER.debug(
-                "Release '%s' excluded: download_allowed=False", release.title
-            )
-            continue
-        if _matches_all_conditions(release, conditions):
-            result.append(release)
-    return result
+    return [r for r in releases if _matches_all_conditions(r, conditions)]
 
 
 def _matches_all_conditions(
