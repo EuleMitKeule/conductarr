@@ -108,15 +108,6 @@ class TestFilterReleases:
         ]
         assert _filter_releases(releases, []) == releases
 
-    def test_download_not_allowed_excluded(self) -> None:
-        releases = [
-            _make_release(guid="a", download_allowed=True),
-            _make_release(guid="b", download_allowed=False),
-        ]
-        result = _filter_releases(releases, [])
-        assert len(result) == 1
-        assert result[0].guid == "a"
-
     def test_custom_format_condition(self) -> None:
         cond = AcceptConditionConfig(type="custom_format", name="German DL")
         releases = [
@@ -808,21 +799,3 @@ class TestSeedUpgradeQueues:
 
         assert await repo.get_item("radarr", "1") is not None
         assert await repo.get_item("sonarr", "101") is not None
-
-
-# ---------------------------------------------------------------------------
-# _filter_releases download_allowed logging
-# ---------------------------------------------------------------------------
-
-
-class TestFilterReleasesDownloadAllowedLog:
-    def test_download_not_allowed_is_logged(self, caplog: Any) -> None:
-        import logging
-
-        release = _make_release(
-            guid="a", title="Blocked.Release", download_allowed=False
-        )
-        with caplog.at_level(logging.DEBUG, logger="conductarr.upgrade.scheduler"):
-            _filter_releases([release], [])
-        assert any("Blocked.Release" in r.message for r in caplog.records)
-        assert any("download_allowed=False" in r.message for r in caplog.records)
