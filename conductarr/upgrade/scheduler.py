@@ -45,6 +45,8 @@ class UpgradeScheduler:
         # Per-queue source-turn counter (monotonically increasing index)
         self._source_turn: dict[str, int] = {}
         self._daily_tasks: list[asyncio.Task[None]] = []
+        # Prevents concurrent _fill_slots calls from over-filling a queue
+        self._fill_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -110,9 +112,7 @@ class UpgradeScheduler:
                 try:
                     await self._fill_slots(qc)
                 except Exception:
-                    _LOGGER.exception(
-                        "Error filling slots for queue '%s'", qc.name
-                    )
+                    _LOGGER.exception("Error filling slots for queue '%s'", qc.name)
 
     # ------------------------------------------------------------------
     # Internal loops
@@ -143,36 +143,37 @@ class UpgradeScheduler:
         if upgrade is None or not upgrade.enabled:
             return
 
-        active = await self._count_active(queue_config.name)
-        _LOGGER.debug(
-            "Filling slots for queue '%s': %d/%d active",
-            queue_config.name,
-            active,
-            upgrade.max_active,
-        )
-        slots_to_fill = upgrade.max_active - active
-        if slots_to_fill <= 0:
-            return
+        async with self._fill_lock:
+            active = await self._count_active(queue_config.name)
+            _LOGGER.debug(
+                "Filling slots for queue '%s': %d/%d active",
+                queue_config.name,
+                active,
+                upgrade.max_active,
+            )
+            slots_to_fill = upgrade.max_active - active
+            if slots_to_fill <= 0:
+                return
 
-        sources = upgrade.sources
-        if not sources:
-            return
+            sources = upgrade.sources
+            if not sources:
+                return
 
-        queue_name = queue_config.name
-        turn = self._source_turn.get(queue_name, 0)
-        consecutive_misses = 0  # sources tried in a row without filling a slot
+            queue_name = queue_config.name
+            turn = self._source_turn.get(queue_name, 0)
+            consecutive_misses = 0  # sources tried in a row without filling a slot
 
-        while slots_to_fill > 0 and consecutive_misses < len(sources):
-            source = sources[turn % len(sources)]
-            turn += 1
-            filled = await self._try_fill_from_source(upgrade, queue_name, source)
-            if filled:
-                slots_to_fill -= 1
-                consecutive_misses = 0
-            else:
-                consecutive_misses += 1
+            while slots_to_fill > 0 and consecutive_misses < len(sources):
+                source = sources[turn % len(sources)]
+                turn += 1
+                filled = await self._try_fill_from_source(upgrade, queue_name, source)
+                if filled:
+                    slots_to_fill -= 1
+                    consecutive_misses = 0
+                else:
+                    consecutive_misses += 1
 
-        self._source_turn[queue_name] = turn
+            self._source_turn[queue_name] = turn
 
     async def _daily_scan(self, queue_config: VirtualQueueConfig) -> None:
         """Search all due candidates and grab up to *max_active* matches."""
@@ -309,9 +310,7 @@ class UpgradeScheduler:
                 continue
 
             now_str = datetime.now(UTC).isoformat()
-            _LOGGER.debug(
-                "Searching releases for %s/%s", source, candidate.source_id
-            )
+            _LOGGER.debug("Searching releases for %s/%s", source, candidate.source_id)
             try:
                 releases = await self._search_releases(source, int(candidate.source_id))
                 matching = _filter_releases(releases, upgrade.accept_conditions)

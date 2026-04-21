@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -878,3 +879,36 @@ class TestOnReconcileComplete:
 
         radarr.grab_release.assert_awaited_once()
         sonarr.grab_release.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# UpgradeScheduler._fill_slots — lock serialisation
+# ---------------------------------------------------------------------------
+
+
+class TestFillSlotsLock:
+    async def test_concurrent_calls_do_not_overfill(
+        self, repo: QueueRepository
+    ) -> None:
+        """Two concurrent _fill_slots calls must not both grab when max_active=1.
+
+        The lock serialises the two calls.  After the first completes it marks
+        the only candidate as ``upgrade_grabbed=True``, so when the second call
+        runs it finds no eligible candidates and returns without grabbing.
+        """
+        qc = _make_queue_config(sources=["radarr"], max_active=1)
+        # Only one candidate — after the first grab it is marked as grabbed
+        # and the second locked call finds nothing to do.
+        await _seed_item(repo, "radarr", "1", "german_upgrade")
+
+        radarr = MagicMock()
+        radarr.search_releases = AsyncMock(return_value=[_make_release()])
+        radarr.grab_release = AsyncMock()
+
+        scheduler = UpgradeScheduler(repo, [qc], radarr_client=radarr)
+        await asyncio.gather(
+            scheduler._fill_slots(qc),
+            scheduler._fill_slots(qc),
+        )
+
+        assert radarr.grab_release.await_count == 1
