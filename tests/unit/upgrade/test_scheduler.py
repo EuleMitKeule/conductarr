@@ -912,3 +912,83 @@ class TestFillSlotsLock:
         )
 
         assert radarr.grab_release.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# UpgradeScheduler._pending_grabs
+# ---------------------------------------------------------------------------
+
+
+class TestPendingGrabs:
+    async def test_grab_adds_to_pending(self, repo: QueueRepository) -> None:
+        qc = _make_queue_config(sources=["radarr"], max_active=2)
+        await _seed_item(repo, "radarr", "1", "german_upgrade")
+
+        radarr = MagicMock()
+        radarr.search_releases = AsyncMock(return_value=[_make_release()])
+        radarr.grab_release = AsyncMock()
+
+        scheduler = UpgradeScheduler(repo, [qc], radarr_client=radarr)
+        assert len(scheduler._pending_grabs) == 0
+
+        await scheduler._fill_slots(qc)
+
+        radarr.grab_release.assert_awaited_once()
+        assert len(scheduler._pending_grabs) == 1
+
+    async def test_pending_counted_as_active(self, repo: QueueRepository) -> None:
+        """A grab in _pending_grabs is counted as an active slot."""
+        qc = _make_queue_config(sources=["radarr"], max_active=1)
+        item = await _seed_item(repo, "radarr", "1", "german_upgrade")
+        assert item.id is not None
+        scheduler = UpgradeScheduler(repo, [qc], radarr_client=MagicMock())
+
+        # Manually add a pending grab — no job_map row exists yet
+        scheduler._pending_grabs.add(("german_upgrade", item.id))
+
+        count = await scheduler._count_active("german_upgrade")
+        assert count == 1
+
+    async def test_pending_pruned_when_job_map_appears(
+        self, repo: QueueRepository
+    ) -> None:
+        """Once the job_map row is created the pending entry is removed."""
+        qc = _make_queue_config(sources=["radarr"], max_active=2)
+        item = await _seed_item(repo, "radarr", "1", "german_upgrade")
+        assert item.id is not None
+        scheduler = UpgradeScheduler(repo, [qc], radarr_client=MagicMock())
+
+        scheduler._pending_grabs.add(("german_upgrade", item.id))
+        assert len(scheduler._pending_grabs) == 1
+
+        # Simulate SABnzbd picking up the download → job_map row created
+        await repo.upsert_job_map("nzo-123", item.id, "german_upgrade")
+
+        count = await scheduler._count_active("german_upgrade")
+        # job_map has 1 entry; pending was pruned → still 1, no double-count
+        assert count == 1
+        assert len(scheduler._pending_grabs) == 0
+
+    async def test_pending_not_double_counted_after_job_map(
+        self, repo: QueueRepository
+    ) -> None:
+        """Active count must be 1, not 2, once job_map catches up."""
+        qc = _make_queue_config(sources=["radarr"], max_active=2)
+        item = await _seed_item(repo, "radarr", "1", "german_upgrade")
+        assert item.id is not None
+
+        radarr = MagicMock()
+        radarr.search_releases = AsyncMock(return_value=[_make_release()])
+        radarr.grab_release = AsyncMock()
+
+        scheduler = UpgradeScheduler(repo, [qc], radarr_client=radarr)
+        await scheduler._fill_slots(qc)
+        # Pending grab is recorded
+        assert len(scheduler._pending_grabs) == 1
+
+        # SABnzbd picks it up
+        await repo.upsert_job_map("nzo-456", item.id, "german_upgrade")
+
+        count = await scheduler._count_active("german_upgrade")
+        assert count == 1  # job_map (1) + pending (0, pruned) = 1
+        assert len(scheduler._pending_grabs) == 0

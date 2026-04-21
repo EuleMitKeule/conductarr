@@ -47,6 +47,10 @@ class UpgradeScheduler:
         self._daily_tasks: list[asyncio.Task[None]] = []
         # Prevents concurrent _fill_slots calls from over-filling a queue
         self._fill_lock = asyncio.Lock()
+        # Tracks grabs sent to the indexer but not yet reflected in job_map.
+        # Stored as (queue_name, queue_item_id) so _count_active can treat them
+        # as occupied slots until SABnzbd picks up the download.
+        self._pending_grabs: set[tuple[str, int]] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -260,6 +264,7 @@ class UpgradeScheduler:
                     candidate.metadata["upgrade_grabbed"] = True
                     candidate.metadata["upgrade_last_searched_at"] = now_str
                     await self._repo.update_metadata(candidate.id, candidate.metadata)
+                    self._pending_grabs.add((queue_name, candidate.id))
                     _LOGGER.info(
                         "Daily scan: grabbed upgrade for %s/%s: %s",
                         source,
@@ -349,6 +354,7 @@ class UpgradeScheduler:
                 candidate.metadata["upgrade_grabbed"] = True
                 candidate.metadata["upgrade_last_searched_at"] = now_str
                 await self._repo.update_metadata(candidate.id, candidate.metadata)
+                self._pending_grabs.add((queue_name, candidate.id))
                 _LOGGER.info(
                     "Grabbed upgrade for %s/%s: %s",
                     source,
@@ -371,11 +377,33 @@ class UpgradeScheduler:
     # ------------------------------------------------------------------
 
     async def _count_active(self, virtual_queue: str) -> int:
-        """Count currently active job mappings for *virtual_queue*."""
+        """Count currently active job mappings for *virtual_queue*.
+
+        Includes grabs that were sent to the indexer but have not yet appeared
+        in the SABnzbd job_map (``_pending_grabs``).  Entries are pruned from
+        ``_pending_grabs`` as soon as their corresponding job_map row exists,
+        preventing double-counting.
+        """
         all_maps = await self._repo.get_all_job_maps()
-        count = sum(1 for jm in all_maps if jm["virtual_queue"] == virtual_queue)
-        _LOGGER.debug("Queue '%s': %d active job(s)", virtual_queue, count)
-        return count
+        # Prune pending entries that are now tracked in the job_map
+        if self._pending_grabs:
+            committed_ids = {jm["queue_item_id"] for jm in all_maps}
+            self._pending_grabs = {
+                pg for pg in self._pending_grabs if pg[1] not in committed_ids
+            }
+        job_map_count = sum(
+            1 for jm in all_maps if jm["virtual_queue"] == virtual_queue
+        )
+        pending_count = sum(1 for pg in self._pending_grabs if pg[0] == virtual_queue)
+        total = job_map_count + pending_count
+        _LOGGER.debug(
+            "Queue '%s': %d active job(s) (%d in job_map, %d pending)",
+            virtual_queue,
+            total,
+            job_map_count,
+            pending_count,
+        )
+        return total
 
     # ------------------------------------------------------------------
     # Seed
