@@ -314,12 +314,13 @@ class UpgradeScheduler:
     # ------------------------------------------------------------------
 
     async def seed_upgrade_queues(self) -> None:
-        """Pre-populate the DB with all tagged items from Radarr/Sonarr.
+        """Pre-populate the DB with upgrade candidates from Radarr/Sonarr.
 
-        For each upgrade queue, reads the tag labels from its ``tags`` matchers
-        and creates :class:`~conductarr.queue.models.QueueItem` entries for any
-        Radarr movies / Sonarr episodes that carry those tags but have not yet
-        been seen in the SABnzbd queue.  Existing items are never overwritten.
+        For each upgrade queue, fetches all movies/episodes that have a file
+        but do not yet satisfy the queue's ``accept_conditions``.  Those items
+        are inserted as :class:`~conductarr.queue.models.QueueItem` entries so
+        the scheduler can search for better releases.  Existing items are never
+        overwritten.
         """
         for qc in self._upgrade_queues:
             if qc.upgrade and qc.upgrade.enabled:
@@ -330,36 +331,33 @@ class UpgradeScheduler:
 
     async def _seed_queue(self, queue_config: VirtualQueueConfig) -> None:
         """Seed one upgrade queue from Radarr/Sonarr."""
-        tag_filter = self._get_tag_filter(queue_config)
-        if not tag_filter:
-            _LOGGER.debug(
-                "Queue '%s': no 'tags' matchers configured, skipping seed",
-                queue_config.name,
-            )
-            return
-
         upgrade = queue_config.upgrade
         assert upgrade is not None  # guaranteed by caller
 
         for source in upgrade.sources:
             if source == "radarr" and self._radarr is not None:
-                await self._seed_from_radarr(queue_config.name, tag_filter)
+                await self._seed_from_radarr(queue_config.name, upgrade)
             elif source == "sonarr" and self._sonarr is not None:
-                await self._seed_from_sonarr(queue_config.name, tag_filter)
+                await self._seed_from_sonarr(queue_config.name, upgrade)
 
-    async def _seed_from_radarr(self, queue_name: str, tag_filter: list[str]) -> None:
-        """Create QueueItems for all Radarr movies matching *tag_filter*."""
+    async def _seed_from_radarr(
+        self, queue_name: str, upgrade_config: UpgradeConfig
+    ) -> None:
+        """Create QueueItems for Radarr movies that do not satisfy upgrade conditions."""
+        assert self._radarr is not None  # caller guarantees this
         try:
-            movies = await self._radarr.get_movies(has_file=True)  # type: ignore[union-attr]
-            tag_map = await self._radarr.get_tags()  # type: ignore[union-attr]
+            movies = await self._radarr.get_movies(has_file=True)
         except Exception:
-            _LOGGER.exception("Seed: failed to fetch Radarr movies or tags")
+            _LOGGER.exception("Seed: failed to fetch Radarr movies")
             return
 
         seeded = 0
         for movie in movies:
-            movie_tags = [tag_map[tid] for tid in movie.tag_ids if tid in tag_map]
-            if not any(t in tag_filter for t in movie_tags):
+            if _media_satisfies_conditions(
+                movie.custom_formats,
+                movie.custom_format_score,
+                upgrade_config.accept_conditions,
+            ):
                 continue
             existing = await self._repo.get_item("radarr", str(movie.id))
             if existing is None:
@@ -367,7 +365,7 @@ class UpgradeScheduler:
                     source="radarr",
                     source_id=str(movie.id),
                     virtual_queue=queue_name,
-                    tags=movie_tags,
+                    tags=[],
                 )
                 await self._repo.upsert_item(item)
                 seeded += 1
@@ -375,56 +373,46 @@ class UpgradeScheduler:
             "Seed: inserted %d new Radarr item(s) into '%s'", seeded, queue_name
         )
 
-    async def _seed_from_sonarr(self, queue_name: str, tag_filter: list[str]) -> None:
-        """Create QueueItems for all monitored Sonarr episodes matching *tag_filter*."""
+    async def _seed_from_sonarr(
+        self, queue_name: str, upgrade_config: UpgradeConfig
+    ) -> None:
+        """Create QueueItems for Sonarr episodes that do not satisfy upgrade conditions."""
+        assert self._sonarr is not None  # caller guarantees this
         try:
-            all_series = await self._sonarr.get_series()  # type: ignore[union-attr]
-            tag_map = await self._sonarr.get_tags()  # type: ignore[union-attr]
+            all_series = await self._sonarr.get_series()
         except Exception:
-            _LOGGER.exception("Seed: failed to fetch Sonarr series or tags")
+            _LOGGER.exception("Seed: failed to fetch Sonarr series")
             return
 
         seeded = 0
         for series in all_series:
-            series_tags = [tag_map[tid] for tid in series.tag_ids if tid in tag_map]
-            if not any(t in tag_filter for t in series_tags):
-                continue
             try:
-                episodes = await self._sonarr.get_episodes(  # type: ignore[union-attr]
-                    series.id, monitored=True, has_file=True
-                )
+                episodes = await self._sonarr.get_episodes(series.id, has_file=True)
             except Exception:
                 _LOGGER.warning(
                     "Seed: failed to fetch episodes for Sonarr series %d", series.id
                 )
                 continue
             for episode in episodes:
+                if _media_satisfies_conditions(
+                    episode.custom_formats,
+                    episode.custom_format_score,
+                    upgrade_config.accept_conditions,
+                ):
+                    continue
                 existing = await self._repo.get_item("sonarr", str(episode.id))
                 if existing is None:
                     item = QueueItem(
                         source="sonarr",
                         source_id=str(episode.id),
                         virtual_queue=queue_name,
-                        tags=series_tags,
+                        tags=[],
                     )
                     await self._repo.upsert_item(item)
                     seeded += 1
         _LOGGER.info(
             "Seed: inserted %d new Sonarr episode(s) into '%s'", seeded, queue_name
         )
-
-    @staticmethod
-    def _get_tag_filter(queue_config: VirtualQueueConfig) -> list[str]:
-        """Extract unique tag labels from all ``tags`` matchers in *queue_config*."""
-        seen: set[str] = set()
-        tags: list[str] = []
-        for matcher in queue_config.matchers:
-            if matcher.type == "tags":
-                for tag in matcher.tags:
-                    if tag not in seen:
-                        seen.add(tag)
-                        tags.append(tag)
-        return tags
 
     async def _search_releases(self, source: str, item_id: int) -> list[ReleaseResult]:
         """Dispatch search_releases to the right client based on *source*."""
@@ -453,6 +441,25 @@ class UpgradeScheduler:
             await self._sonarr.grab_release(release)
         else:
             raise ValueError(f"Unknown upgrade source: {source}")
+
+
+def _media_satisfies_conditions(
+    custom_formats: list[str],
+    custom_format_score: int,
+    conditions: list[AcceptConditionConfig],
+) -> bool:
+    """Return ``True`` if existing media already satisfies ALL *conditions*.
+
+    Used during seeding to skip items that have already been upgraded.
+    """
+    for cond in conditions:
+        if cond.type == "custom_format":
+            if cond.name not in custom_formats:
+                return False
+        elif cond.type == "custom_format_min_score":
+            if custom_format_score < cond.value:
+                return False
+    return True
 
 
 def _filter_releases(

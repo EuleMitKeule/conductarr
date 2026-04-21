@@ -61,6 +61,7 @@ class RadarrMovie:
     custom_format_score: int
     quality_profile_id: int
     tag_ids: list[int] = field(default_factory=list)
+    custom_formats: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -289,4 +290,5 @@ class RadarrClient:
             custom_format_score=data.get("customFormatScore", 0),
             quality_profile_id=data.get("qualityProfileId", 0),
             tag_ids=list(data.get("tags", [])),
+            custom_formats=[cf.get("name", "") for cf in data.get("customFormats", [])],
         )

@@ -72,6 +72,7 @@ class SonarrEpisode:
     monitored: bool
     has_file: bool
     custom_format_score: int
+    custom_formats: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -378,4 +379,5 @@ class SonarrClient:
             monitored=data.get("monitored", False),
             has_file=data.get("hasFile", False),
             custom_format_score=data.get("customFormatScore", 0),
+            custom_formats=[cf.get("name", "") for cf in data.get("customFormats", [])],
         )
