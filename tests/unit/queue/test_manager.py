@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest_asyncio
 
+from conductarr.clients.sabnzbd import Queue, QueueSlot
 from conductarr.config import MemoryDatabaseConfig
 from conductarr.db.database import Database
 from conductarr.db.repository import QueueRepository
@@ -182,3 +184,160 @@ class TestMarkFailed:
         assert updated.status == "pending"
         assert updated.attempts == 1
         assert updated.last_tried_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Helper: build a minimal QueueSlot
+# ---------------------------------------------------------------------------
+
+
+def _make_slot(
+    nzo_id: str,
+    index: int,
+    status: str = "Downloading",
+) -> QueueSlot:
+    return QueueSlot(
+        nzo_id=nzo_id,
+        filename=f"file-{nzo_id}.nzb",
+        cat="misc",
+        priority="Normal",
+        status=status,
+        index=index,
+        mb="100",
+        mbleft="50",
+        percentage="50",
+        timeleft="0:05:00",
+        labels=[],
+    )
+
+
+def _make_queue(*slots: QueueSlot) -> Queue:
+    return Queue(
+        status="Downloading",
+        paused=False,
+        noofslots=len(slots),
+        slots=list(slots),
+    )
+
+
+# ---------------------------------------------------------------------------
+# _reorder_and_enforce_active – pause status guard
+# ---------------------------------------------------------------------------
+
+
+class TestReorderAndEnforceActive:
+    """Tests for the pause-status guard in _reorder_and_enforce_active."""
+
+    async def test_does_not_pause_verifying_slot(self, repo: QueueRepository) -> None:
+        """Slots in final phases (Verifying, Extracting, …) must NOT be paused."""
+        sabnzbd = MagicMock()
+        sabnzbd.pause_job = AsyncMock()
+        sabnzbd.resume_job = AsyncMock()
+        sabnzbd.switch = AsyncMock()
+
+        vq = VirtualQueue(
+            name="user_requests",
+            priority=100,
+            matchers=[{"type": "tags", "tags": ["request"]}],
+        )
+        manager = QueueManager(repo, [vq], sabnzbd_client=sabnzbd)
+
+        # Slot 0 is the top slot (Downloading) – no resume needed.
+        # Slot 1 is in "Verifying" phase – must NOT be paused.
+        slot_top = _make_slot("nzo-top", index=0, status="Downloading")
+        slot_verifying = _make_slot("nzo-verifying", index=1, status="Verifying")
+        sab_queue = _make_queue(slot_top, slot_verifying)
+
+        # Map both slots so the manager can look them up
+        item_top = await repo.upsert_item(
+            QueueItem(
+                source="radarr", source_id="1", tags=[], virtual_queue="user_requests"
+            )
+        )
+        item_ver = await repo.upsert_item(
+            QueueItem(
+                source="radarr", source_id="2", tags=[], virtual_queue="user_requests"
+            )
+        )
+        assert item_top.id is not None
+        assert item_ver.id is not None
+        await repo.upsert_job_map("nzo-top", item_top.id, "user_requests")
+        await repo.upsert_job_map("nzo-verifying", item_ver.id, "user_requests")
+
+        await manager._reorder_and_enforce_active(sab_queue)
+
+        sabnzbd.pause_job.assert_not_awaited()
+
+    async def test_pauses_queued_slot(self, repo: QueueRepository) -> None:
+        """Slots with status 'Queued' must be paused when not at slot 0."""
+        sabnzbd = MagicMock()
+        sabnzbd.pause_job = AsyncMock()
+        sabnzbd.resume_job = AsyncMock()
+        sabnzbd.switch = AsyncMock()
+
+        vq = VirtualQueue(
+            name="user_requests",
+            priority=100,
+            matchers=[{"type": "tags", "tags": ["request"]}],
+        )
+        manager = QueueManager(repo, [vq], sabnzbd_client=sabnzbd)
+
+        slot_top = _make_slot("nzo-top", index=0, status="Downloading")
+        slot_queued = _make_slot("nzo-queued", index=1, status="Queued")
+        sab_queue = _make_queue(slot_top, slot_queued)
+
+        item_top = await repo.upsert_item(
+            QueueItem(
+                source="radarr", source_id="10", tags=[], virtual_queue="user_requests"
+            )
+        )
+        item_q = await repo.upsert_item(
+            QueueItem(
+                source="radarr", source_id="11", tags=[], virtual_queue="user_requests"
+            )
+        )
+        assert item_top.id is not None
+        assert item_q.id is not None
+        await repo.upsert_job_map("nzo-top", item_top.id, "user_requests")
+        await repo.upsert_job_map("nzo-queued", item_q.id, "user_requests")
+
+        await manager._reorder_and_enforce_active(sab_queue)
+
+        sabnzbd.pause_job.assert_awaited_once_with("nzo-queued")
+
+    async def test_does_not_pause_extracting_slot(self, repo: QueueRepository) -> None:
+        """Slots in 'Extracting' phase must NOT be paused."""
+        sabnzbd = MagicMock()
+        sabnzbd.pause_job = AsyncMock()
+        sabnzbd.resume_job = AsyncMock()
+        sabnzbd.switch = AsyncMock()
+
+        vq = VirtualQueue(
+            name="user_requests",
+            priority=100,
+            matchers=[{"type": "tags", "tags": ["request"]}],
+        )
+        manager = QueueManager(repo, [vq], sabnzbd_client=sabnzbd)
+
+        slot_top = _make_slot("nzo-top", index=0, status="Downloading")
+        slot_extracting = _make_slot("nzo-extract", index=1, status="Extracting")
+        sab_queue = _make_queue(slot_top, slot_extracting)
+
+        item_top = await repo.upsert_item(
+            QueueItem(
+                source="radarr", source_id="20", tags=[], virtual_queue="user_requests"
+            )
+        )
+        item_ext = await repo.upsert_item(
+            QueueItem(
+                source="radarr", source_id="21", tags=[], virtual_queue="user_requests"
+            )
+        )
+        assert item_top.id is not None
+        assert item_ext.id is not None
+        await repo.upsert_job_map("nzo-top", item_top.id, "user_requests")
+        await repo.upsert_job_map("nzo-extract", item_ext.id, "user_requests")
+
+        await manager._reorder_and_enforce_active(sab_queue)
+
+        sabnzbd.pause_job.assert_not_awaited()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -60,6 +60,7 @@ class RadarrMovie:
     monitored: bool
     custom_format_score: int
     quality_profile_id: int
+    tag_ids: list[int] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +180,12 @@ class RadarrClient:
     # ------------------------------------------------------------------
 
     async def trigger_search(self, movie_id: int) -> bool:
-        """Trigger a movie search in Radarr.  Returns ``True`` on success."""
+        """Trigger a movie search in Radarr.  Returns ``True`` on success.
+
+        .. warning::
+            This initiates an actual download search in Radarr.  Only call
+            from the :class:`~conductarr.upgrade.scheduler.UpgradeScheduler`.
+        """
         try:
             await self._get_api().command.execute("MoviesSearch", movieIds=[movie_id])
         except PyarrUnauthorizedError as exc:
@@ -246,14 +252,8 @@ class RadarrClient:
 
     async def grab_release(self, release: ReleaseResult) -> None:
         """Force-grab *release* via POST /api/v3/release."""
-        payload: dict[str, Any] = {
-            "guid": release.guid,
-            "indexerId": release.indexer_id,
-        }
         try:
-            await self._get_api().http_utils.request(
-                "release", method="POST", json_data=payload
-            )
+            await self._get_api().release.add(release.guid, release.indexer_id)
         except PyarrUnauthorizedError as exc:
             raise RadarrAuthError(str(exc)) from exc
         except (PyarrConnectionError, ConnectionError, OSError) as exc:
@@ -288,4 +288,5 @@ class RadarrClient:
             monitored=data.get("monitored", False),
             custom_format_score=data.get("customFormatScore", 0),
             quality_profile_id=data.get("qualityProfileId", 0),
+            tag_ids=list(data.get("tags", [])),
         )

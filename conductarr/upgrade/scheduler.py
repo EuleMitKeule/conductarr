@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from conductarr.clients.release import ReleaseResult
 from conductarr.config import AcceptConditionConfig, UpgradeConfig, VirtualQueueConfig
 from conductarr.db.repository import QueueRepository
+from conductarr.queue.models import QueueItem
 
 if TYPE_CHECKING:
     from conductarr.clients.radarr import RadarrClient
@@ -61,6 +62,7 @@ class UpgradeScheduler:
         _LOGGER.info(
             "UpgradeScheduler started (%d upgrade queue(s))", len(self._daily_tasks)
         )
+        await self.seed_upgrade_queues()
 
     async def stop(self) -> None:
         """Cancel all running daily scan tasks."""
@@ -307,6 +309,123 @@ class UpgradeScheduler:
         all_maps = await self._repo.get_all_job_maps()
         return sum(1 for jm in all_maps if jm["virtual_queue"] == virtual_queue)
 
+    # ------------------------------------------------------------------
+    # Seed
+    # ------------------------------------------------------------------
+
+    async def seed_upgrade_queues(self) -> None:
+        """Pre-populate the DB with all tagged items from Radarr/Sonarr.
+
+        For each upgrade queue, reads the tag labels from its ``tags`` matchers
+        and creates :class:`~conductarr.queue.models.QueueItem` entries for any
+        Radarr movies / Sonarr episodes that carry those tags but have not yet
+        been seen in the SABnzbd queue.  Existing items are never overwritten.
+        """
+        for qc in self._upgrade_queues:
+            if qc.upgrade and qc.upgrade.enabled:
+                try:
+                    await self._seed_queue(qc)
+                except Exception:
+                    _LOGGER.exception("Seed: unexpected error for queue '%s'", qc.name)
+
+    async def _seed_queue(self, queue_config: VirtualQueueConfig) -> None:
+        """Seed one upgrade queue from Radarr/Sonarr."""
+        tag_filter = self._get_tag_filter(queue_config)
+        if not tag_filter:
+            _LOGGER.debug(
+                "Queue '%s': no 'tags' matchers configured, skipping seed",
+                queue_config.name,
+            )
+            return
+
+        upgrade = queue_config.upgrade
+        assert upgrade is not None  # guaranteed by caller
+
+        for source in upgrade.sources:
+            if source == "radarr" and self._radarr is not None:
+                await self._seed_from_radarr(queue_config.name, tag_filter)
+            elif source == "sonarr" and self._sonarr is not None:
+                await self._seed_from_sonarr(queue_config.name, tag_filter)
+
+    async def _seed_from_radarr(self, queue_name: str, tag_filter: list[str]) -> None:
+        """Create QueueItems for all Radarr movies matching *tag_filter*."""
+        try:
+            movies = await self._radarr.get_movies()  # type: ignore[union-attr]
+            tag_map = await self._radarr.get_tags()  # type: ignore[union-attr]
+        except Exception:
+            _LOGGER.exception("Seed: failed to fetch Radarr movies or tags")
+            return
+
+        seeded = 0
+        for movie in movies:
+            movie_tags = [tag_map[tid] for tid in movie.tag_ids if tid in tag_map]
+            if not any(t in tag_filter for t in movie_tags):
+                continue
+            existing = await self._repo.get_item("radarr", str(movie.id))
+            if existing is None:
+                item = QueueItem(
+                    source="radarr",
+                    source_id=str(movie.id),
+                    virtual_queue=queue_name,
+                    tags=movie_tags,
+                )
+                await self._repo.upsert_item(item)
+                seeded += 1
+        _LOGGER.info(
+            "Seed: inserted %d new Radarr item(s) into '%s'", seeded, queue_name
+        )
+
+    async def _seed_from_sonarr(self, queue_name: str, tag_filter: list[str]) -> None:
+        """Create QueueItems for all monitored Sonarr episodes matching *tag_filter*."""
+        try:
+            all_series = await self._sonarr.get_series()  # type: ignore[union-attr]
+            tag_map = await self._sonarr.get_tags()  # type: ignore[union-attr]
+        except Exception:
+            _LOGGER.exception("Seed: failed to fetch Sonarr series or tags")
+            return
+
+        seeded = 0
+        for series in all_series:
+            series_tags = [tag_map[tid] for tid in series.tag_ids if tid in tag_map]
+            if not any(t in tag_filter for t in series_tags):
+                continue
+            try:
+                episodes = await self._sonarr.get_episodes(  # type: ignore[union-attr]
+                    series.id, monitored=True, has_file=False
+                )
+            except Exception:
+                _LOGGER.warning(
+                    "Seed: failed to fetch episodes for Sonarr series %d", series.id
+                )
+                continue
+            for episode in episodes:
+                existing = await self._repo.get_item("sonarr", str(episode.id))
+                if existing is None:
+                    item = QueueItem(
+                        source="sonarr",
+                        source_id=str(episode.id),
+                        virtual_queue=queue_name,
+                        tags=series_tags,
+                    )
+                    await self._repo.upsert_item(item)
+                    seeded += 1
+        _LOGGER.info(
+            "Seed: inserted %d new Sonarr episode(s) into '%s'", seeded, queue_name
+        )
+
+    @staticmethod
+    def _get_tag_filter(queue_config: VirtualQueueConfig) -> list[str]:
+        """Extract unique tag labels from all ``tags`` matchers in *queue_config*."""
+        seen: set[str] = set()
+        tags: list[str] = []
+        for matcher in queue_config.matchers:
+            if matcher.type == "tags":
+                for tag in matcher.tags:
+                    if tag not in seen:
+                        seen.add(tag)
+                        tags.append(tag)
+        return tags
+
     async def _search_releases(self, source: str, item_id: int) -> list[ReleaseResult]:
         """Dispatch search_releases to the right client based on *source*."""
         if source == "radarr":
@@ -349,6 +468,9 @@ def _filter_releases(
     result = []
     for release in releases:
         if not release.download_allowed:
+            _LOGGER.debug(
+                "Release '%s' excluded: download_allowed=False", release.title
+            )
             continue
         if _matches_all_conditions(release, conditions):
             result.append(release)

@@ -517,3 +517,215 @@ class TestGetUpgradeCandidates:
         result = await repo.get_upgrade_candidates("german_upgrade", "radarr", 7)
         assert len(result) == 1
         assert result[0].source_id == "1"
+
+
+# ---------------------------------------------------------------------------
+# UpgradeScheduler.seed_upgrade_queues
+# ---------------------------------------------------------------------------
+
+
+def _make_movie(
+    movie_id: int,
+    tag_ids: list[int] | None = None,
+) -> Any:
+    """Return a minimal RadarrMovie-like mock."""
+    from conductarr.clients.radarr import RadarrMovie
+
+    return RadarrMovie(
+        id=movie_id,
+        title=f"Movie {movie_id}",
+        tmdb_id=movie_id * 100,
+        has_file=False,
+        monitored=True,
+        custom_format_score=0,
+        quality_profile_id=1,
+        tag_ids=tag_ids or [],
+    )
+
+
+def _make_series(
+    series_id: int,
+    tag_ids: list[int] | None = None,
+) -> Any:
+    """Return a minimal SonarrSeries-like mock."""
+    from conductarr.clients.sonarr import SonarrSeries
+
+    return SonarrSeries(
+        id=series_id,
+        title=f"Series {series_id}",
+        tvdb_id=series_id * 100,
+        monitored=True,
+        status="continuing",
+        tag_ids=tag_ids or [],
+    )
+
+
+def _make_episode(episode_id: int, series_id: int) -> Any:
+    """Return a minimal SonarrEpisode-like mock."""
+    from conductarr.clients.sonarr import SonarrEpisode
+
+    return SonarrEpisode(
+        id=episode_id,
+        series_id=series_id,
+        episode_number=1,
+        season_number=1,
+        title=f"Episode {episode_id}",
+        monitored=True,
+        has_file=False,
+        custom_format_score=0,
+    )
+
+
+class TestSeedUpgradeQueues:
+    async def test_seed_radarr_creates_missing_items(
+        self, repo: QueueRepository
+    ) -> None:
+        from conductarr.config import MatcherConfig
+
+        qc = _make_queue_config(sources=["radarr"])
+        # Give the queue a tag matcher so _get_tag_filter returns ["upgrade-de"]
+        qc.matchers.append(MatcherConfig(type="tags", tags=["upgrade-de"]))
+
+        radarr = MagicMock()
+        radarr.get_movies = AsyncMock(
+            return_value=[
+                _make_movie(1, tag_ids=[10]),
+                _make_movie(2, tag_ids=[99]),  # wrong tag → skipped
+            ]
+        )
+        radarr.get_tags = AsyncMock(return_value={10: "upgrade-de"})
+        radarr.search_releases = AsyncMock(return_value=[])
+        radarr.grab_release = AsyncMock()
+
+        scheduler = UpgradeScheduler(repo, [qc], radarr_client=radarr)
+        await scheduler.seed_upgrade_queues()
+
+        item = await repo.get_item("radarr", "1")
+        assert item is not None
+        assert item.virtual_queue == "german_upgrade"
+        assert "upgrade-de" in item.tags
+
+        missing = await repo.get_item("radarr", "2")
+        assert missing is None
+
+    async def test_seed_radarr_skips_existing_items(
+        self, repo: QueueRepository
+    ) -> None:
+        from conductarr.config import MatcherConfig
+
+        qc = _make_queue_config(sources=["radarr"])
+        qc.matchers.append(MatcherConfig(type="tags", tags=["upgrade-de"]))
+        # Pre-seed the item so it already exists
+        await _seed_item(repo, "radarr", "1", "german_upgrade")
+
+        radarr = MagicMock()
+        radarr.get_movies = AsyncMock(return_value=[_make_movie(1, tag_ids=[10])])
+        radarr.get_tags = AsyncMock(return_value={10: "upgrade-de"})
+        radarr.search_releases = AsyncMock(return_value=[])
+        radarr.grab_release = AsyncMock()
+
+        scheduler = UpgradeScheduler(repo, [qc], radarr_client=radarr)
+        await scheduler.seed_upgrade_queues()
+
+        # Item should still exist but not be duplicated
+        items = await repo.get_items_by_queue("german_upgrade")
+        assert len(items) == 1
+
+    async def test_seed_sonarr_creates_episode_items(
+        self, repo: QueueRepository
+    ) -> None:
+        from conductarr.config import MatcherConfig
+
+        qc = _make_queue_config(sources=["sonarr"])
+        qc.matchers.append(MatcherConfig(type="tags", tags=["upgrade-de"]))
+
+        sonarr = MagicMock()
+        sonarr.get_series = AsyncMock(
+            return_value=[
+                _make_series(1, tag_ids=[10]),
+                _make_series(2, tag_ids=[99]),  # wrong tag → skipped
+            ]
+        )
+        sonarr.get_tags = AsyncMock(return_value={10: "upgrade-de"})
+        sonarr.get_episodes = AsyncMock(return_value=[_make_episode(101, series_id=1)])
+        sonarr.search_releases = AsyncMock(return_value=[])
+        sonarr.grab_release = AsyncMock()
+
+        scheduler = UpgradeScheduler(repo, [qc], sonarr_client=sonarr)
+        await scheduler.seed_upgrade_queues()
+
+        item = await repo.get_item("sonarr", "101")
+        assert item is not None
+        assert item.virtual_queue == "german_upgrade"
+
+        # Series 2 had a wrong tag → no episode item
+        sonarr.get_episodes.assert_awaited_once()
+
+    async def test_seed_no_tag_matchers_does_nothing(
+        self, repo: QueueRepository
+    ) -> None:
+        """Queue with no 'tags' matchers should skip seeding entirely."""
+        qc = VirtualQueueConfig(
+            name="no_tags_queue",
+            priority=10,
+            matchers=[],  # no matchers at all
+            upgrade=UpgradeConfig(enabled=True, sources=["radarr"]),
+        )
+
+        radarr = MagicMock()
+        radarr.get_movies = AsyncMock(return_value=[])
+        radarr.get_tags = AsyncMock(return_value={})
+
+        scheduler = UpgradeScheduler(repo, [qc], radarr_client=radarr)
+        await scheduler.seed_upgrade_queues()
+
+        radarr.get_movies.assert_not_awaited()
+
+    async def test_seed_radarr_error_does_not_crash(
+        self, repo: QueueRepository
+    ) -> None:
+        from conductarr.config import MatcherConfig
+
+        qc = _make_queue_config(sources=["radarr"])
+        qc.matchers.append(MatcherConfig(type="tags", tags=["upgrade-de"]))
+
+        radarr = MagicMock()
+        radarr.get_movies = AsyncMock(side_effect=Exception("network error"))
+        radarr.get_tags = AsyncMock(return_value={})
+
+        scheduler = UpgradeScheduler(repo, [qc], radarr_client=radarr)
+        # Should not raise
+        await scheduler.seed_upgrade_queues()
+
+    async def test_get_tag_filter_deduplicates(self) -> None:
+        from conductarr.config import MatcherConfig
+
+        qc = VirtualQueueConfig(
+            name="q",
+            priority=10,
+            matchers=[
+                MatcherConfig(type="tags", tags=["upgrade-de", "other"]),
+                MatcherConfig(type="tags", tags=["upgrade-de"]),  # duplicate
+                MatcherConfig(type="unknown", tags=["ignored"]),
+            ],
+        )
+        result = UpgradeScheduler._get_tag_filter(qc)
+        assert result == ["upgrade-de", "other"]
+
+
+# ---------------------------------------------------------------------------
+# _filter_releases download_allowed logging
+# ---------------------------------------------------------------------------
+
+
+class TestFilterReleasesDownloadAllowedLog:
+    def test_download_not_allowed_is_logged(self, caplog: Any) -> None:
+        import logging
+
+        release = _make_release(
+            guid="a", title="Blocked.Release", download_allowed=False
+        )
+        with caplog.at_level(logging.DEBUG, logger="conductarr.upgrade.scheduler"):
+            _filter_releases([release], [])
+        assert any("Blocked.Release" in r.message for r in caplog.records)
+        assert any("download_allowed=False" in r.message for r in caplog.records)

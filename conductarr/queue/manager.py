@@ -254,6 +254,10 @@ class QueueManager:
                 )
 
         # Enforce exactly one active download: slot[0] runs, all others are paused.
+        # Only pause slots that are in an interruptible state; skip jobs already in
+        # final phases (Fetching, Verifying, Extracting, Moving, …) to avoid data loss.
+        _PAUSABLE_STATUSES = frozenset({"Downloading", "Queued"})
+
         slot_by_id = {s.nzo_id: s for s in sab_queue.slots}
         top_id = desired_order[0]
         top_slot = slot_by_id.get(top_id)
@@ -263,6 +267,6 @@ class QueueManager:
 
         for nzo_id in desired_order[1:]:
             slot = slot_by_id.get(nzo_id)
-            if slot is not None and slot.status != "Paused":
-                _LOGGER.info("Pausing non-top slot %s", nzo_id)
+            if slot is not None and slot.status in _PAUSABLE_STATUSES:
+                _LOGGER.info("Pausing non-top slot %s (status=%s)", nzo_id, slot.status)
                 await self._sabnzbd.pause_job(nzo_id)

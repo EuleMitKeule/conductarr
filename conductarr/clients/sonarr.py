@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -59,6 +59,7 @@ class SonarrSeries:
     tvdb_id: int
     monitored: bool
     status: str
+    tag_ids: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,6 +165,7 @@ class SonarrClient:
                 tvdb_id=s.get("tvdbId", 0),
                 monitored=s.get("monitored", False),
                 status=s.get("status", ""),
+                tag_ids=list(s.get("tags", [])),
             )
             for s in raw
         ]
@@ -225,7 +227,12 @@ class SonarrClient:
     # ------------------------------------------------------------------
 
     async def trigger_episode_search(self, episode_id: int) -> bool:
-        """Trigger an episode search.  Returns ``True`` on success."""
+        """Trigger an episode search.  Returns ``True`` on success.
+
+        .. warning::
+            This initiates an actual download search in Sonarr.  Only call
+            from the :class:`~conductarr.upgrade.scheduler.UpgradeScheduler`.
+        """
         try:
             await self._get_api().command.execute(
                 "EpisodeSearch", episodeIds=[episode_id]
@@ -239,7 +246,12 @@ class SonarrClient:
         return True
 
     async def trigger_season_search(self, series_id: int, season_number: int) -> bool:
-        """Trigger a season search.  Returns ``True`` on success."""
+        """Trigger a season search.  Returns ``True`` on success.
+
+        .. warning::
+            This initiates an actual download search in Sonarr.  Only call
+            from the :class:`~conductarr.upgrade.scheduler.UpgradeScheduler`.
+        """
         try:
             await self._get_api().command.execute(
                 "SeasonSearch",
@@ -314,12 +326,10 @@ class SonarrClient:
     # Releases
     # ------------------------------------------------------------------
 
-    async def search_releases(self, series_id: int) -> list[ReleaseResult]:
-        """Search for available releases for *series_id* via GET /api/v3/release."""
+    async def search_releases(self, episode_id: int) -> list[ReleaseResult]:
+        """Search for available releases for *episode_id* via GET /api/v3/release."""
         try:
-            raw = await self._get_api().http_utils.request(
-                "release", params={"seriesId": series_id}
-            )
+            raw = await self._get_api().release.get(episode_id=episode_id)
         except PyarrUnauthorizedError as exc:
             raise SonarrAuthError(str(exc)) from exc
         except (PyarrConnectionError, ConnectionError, OSError) as exc:
@@ -331,14 +341,8 @@ class SonarrClient:
 
     async def grab_release(self, release: ReleaseResult) -> None:
         """Force-grab *release* via POST /api/v3/release."""
-        payload: dict[str, Any] = {
-            "guid": release.guid,
-            "indexerId": release.indexer_id,
-        }
         try:
-            await self._get_api().http_utils.request(
-                "release", method="POST", json_data=payload
-            )
+            await self._get_api().release.add(release.guid, release.indexer_id)
         except PyarrUnauthorizedError as exc:
             raise SonarrAuthError(str(exc)) from exc
         except (PyarrConnectionError, ConnectionError, OSError) as exc:
