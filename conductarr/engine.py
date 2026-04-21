@@ -105,6 +105,11 @@ class ConductarrEngine:
         self._upgrade_queue_names: frozenset[str] = frozenset(
             q.name for q in upgrade_queue_configs
         )
+        # Previous snapshot state for change-detection logging
+        self._prev_sab_slots: int | None = None
+        self._prev_sab_paused: bool | None = None
+        self._prev_radarr_count: int | None = None
+        self._prev_sonarr_count: int | None = None
 
     async def connect(self) -> None:
         """Connect the database and HTTP client without starting the watch loop."""
@@ -152,12 +157,19 @@ class ConductarrEngine:
         """Dispatch an event to the appropriate handler."""
         match event:
             case QueueSnapshotEvent():
-                _LOGGER.info(
+                _slots = event.queue.noofslots
+                _paused = event.queue.paused
+                _changed = (
+                    _slots != self._prev_sab_slots or _paused != self._prev_sab_paused
+                )
+                (_LOGGER.info if _changed else _LOGGER.debug)(
                     "Event: %s  slots=%d  paused=%s",
                     type(event).__name__,
-                    event.queue.noofslots,
-                    event.queue.paused,
+                    _slots,
+                    _paused,
                 )
+                self._prev_sab_slots = _slots
+                self._prev_sab_paused = _paused
             case JobAddedEvent():
                 _LOGGER.info(
                     "Event: %s  nzo_id=%s  filename=%s",
@@ -195,11 +207,14 @@ class ConductarrEngine:
             case QueueResumedEvent():
                 _LOGGER.info("Event: %s", type(event).__name__)
             case RadarrQueueSnapshotEvent():
-                _LOGGER.info(
+                _count = len(event.items)
+                _changed = _count != self._prev_radarr_count
+                (_LOGGER.info if _changed else _LOGGER.debug)(
                     "Event: %s  items=%d",
                     type(event).__name__,
-                    len(event.items),
+                    _count,
                 )
+                self._prev_radarr_count = _count
             case RadarrQueueItemAddedEvent():
                 _LOGGER.info(
                     "Event: %s  download_id=%s  title=%s",
@@ -215,11 +230,14 @@ class ConductarrEngine:
                     event.title,
                 )
             case SonarrQueueSnapshotEvent():
-                _LOGGER.info(
+                _count = len(event.items)
+                _changed = _count != self._prev_sonarr_count
+                (_LOGGER.info if _changed else _LOGGER.debug)(
                     "Event: %s  items=%d",
                     type(event).__name__,
-                    len(event.items),
+                    _count,
                 )
+                self._prev_sonarr_count = _count
             case SonarrQueueItemAddedEvent():
                 _LOGGER.info(
                     "Event: %s  download_id=%s  title=%s",
