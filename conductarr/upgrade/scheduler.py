@@ -350,7 +350,7 @@ class UpgradeScheduler:
     async def _seed_from_radarr(self, queue_name: str, tag_filter: list[str]) -> None:
         """Create QueueItems for all Radarr movies matching *tag_filter*."""
         try:
-            movies = await self._radarr.get_movies()  # type: ignore[union-attr]
+            movies = await self._radarr.get_movies(has_file=True)  # type: ignore[union-attr]
             tag_map = await self._radarr.get_tags()  # type: ignore[union-attr]
         except Exception:
             _LOGGER.exception("Seed: failed to fetch Radarr movies or tags")
@@ -391,7 +391,7 @@ class UpgradeScheduler:
                 continue
             try:
                 episodes = await self._sonarr.get_episodes(  # type: ignore[union-attr]
-                    series.id, monitored=True, has_file=False
+                    series.id, monitored=True, has_file=True
                 )
             except Exception:
                 _LOGGER.warning(
