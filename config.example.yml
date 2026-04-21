@@ -26,6 +26,18 @@ queues:
     matchers:
       - type: tags
         tags: ["upgrade-de"]
+    upgrade:
+      enabled: true
+      sources:
+        - radarr
+        - sonarr
+      max_active: 2
+      daily_scan_interval: 86400
+      retry_after_days: 7
+      search_interval: 30.0
+      accept_conditions:
+        - type: custom_format
+          name: German DL
 
   - name: kometa
     priority: 10

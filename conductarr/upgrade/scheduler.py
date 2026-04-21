@@ -55,14 +55,6 @@ class UpgradeScheduler:
         await self.seed_upgrade_queues()
         for qc in self._upgrade_queues:
             if qc.upgrade and qc.upgrade.enabled:
-                try:
-                    await self._fill_slots(qc)
-                except Exception:
-                    _LOGGER.exception(
-                        "Error filling slots on startup for queue '%s'", qc.name
-                    )
-        for qc in self._upgrade_queues:
-            if qc.upgrade and qc.upgrade.enabled:
                 task = asyncio.create_task(
                     self._daily_loop(qc),
                     name=f"upgrade-daily-{qc.name}",
@@ -100,6 +92,28 @@ class UpgradeScheduler:
                 await self._fill_slots(qc)
                 return
 
+    async def on_reconcile_complete(self) -> None:
+        """Called after every reconcile cycle; fills any open upgrade slots."""
+        for qc in self._upgrade_queues:
+            if qc.upgrade is None or not qc.upgrade.enabled:
+                continue
+            active = await self._count_active(qc.name)
+            slots_to_fill = qc.upgrade.max_active - active
+            _LOGGER.debug(
+                "Queue '%s': %d/%d active, %d slot(s) to fill",
+                qc.name,
+                active,
+                qc.upgrade.max_active,
+                slots_to_fill,
+            )
+            if slots_to_fill > 0:
+                try:
+                    await self._fill_slots(qc)
+                except Exception:
+                    _LOGGER.exception(
+                        "Error filling slots for queue '%s'", qc.name
+                    )
+
     # ------------------------------------------------------------------
     # Internal loops
     # ------------------------------------------------------------------
@@ -109,6 +123,7 @@ class UpgradeScheduler:
         upgrade = queue_config.upgrade
         assert upgrade is not None  # guaranteed by caller
         while True:
+            await asyncio.sleep(upgrade.daily_scan_interval)
             try:
                 await self._daily_scan(queue_config)
             except asyncio.CancelledError:
@@ -117,7 +132,6 @@ class UpgradeScheduler:
                 _LOGGER.exception(
                     "Unexpected error in daily scan for queue '%s'", queue_config.name
                 )
-            await asyncio.sleep(upgrade.daily_scan_interval)
 
     # ------------------------------------------------------------------
     # Core logic
@@ -130,14 +144,14 @@ class UpgradeScheduler:
             return
 
         active = await self._count_active(queue_config.name)
+        _LOGGER.debug(
+            "Filling slots for queue '%s': %d/%d active",
+            queue_config.name,
+            active,
+            upgrade.max_active,
+        )
         slots_to_fill = upgrade.max_active - active
         if slots_to_fill <= 0:
-            _LOGGER.debug(
-                "Queue '%s': no free slots (%d/%d active)",
-                queue_config.name,
-                active,
-                upgrade.max_active,
-            )
             return
 
         sources = upgrade.sources
@@ -167,10 +181,11 @@ class UpgradeScheduler:
             return
 
         queue_name = queue_config.name
-        grabbed_total = 0
+        _LOGGER.debug("Daily scan starting for queue '%s'", queue_name)
 
         for source in upgrade.sources:
-            if grabbed_total >= upgrade.max_active:
+            active = await self._count_active(queue_name)
+            if active >= upgrade.max_active:
                 break
             try:
                 candidates = await self._repo.get_upgrade_candidates(
@@ -184,8 +199,16 @@ class UpgradeScheduler:
                 )
                 continue
 
+            _LOGGER.debug(
+                "Daily scan: %d due candidate(s) for queue '%s' source '%s'",
+                len(candidates),
+                queue_name,
+                source,
+            )
+
             for candidate in candidates:
-                if grabbed_total >= upgrade.max_active:
+                active = await self._count_active(queue_name)
+                if active >= upgrade.max_active:
                     break
                 if candidate.metadata.get("upgrade_grabbed"):
                     continue
@@ -193,6 +216,9 @@ class UpgradeScheduler:
                     continue
 
                 now_str = datetime.now(UTC).isoformat()
+                _LOGGER.debug(
+                    "Searching releases for %s/%s", source, candidate.source_id
+                )
                 try:
                     releases = await self._search_releases(
                         source, int(candidate.source_id)
@@ -205,7 +231,16 @@ class UpgradeScheduler:
                         candidate.source_id,
                         exc_info=True,
                     )
+                    await asyncio.sleep(upgrade.search_interval)
                     continue
+
+                _LOGGER.debug(
+                    "Found %d releases, %d matching conditions for %s/%s",
+                    len(releases),
+                    len(matching),
+                    source,
+                    candidate.source_id,
+                )
 
                 if matching:
                     best = max(matching, key=lambda r: r.custom_format_score)
@@ -219,11 +254,11 @@ class UpgradeScheduler:
                             best.title,
                             exc_info=True,
                         )
+                        await asyncio.sleep(upgrade.search_interval)
                         continue
                     candidate.metadata["upgrade_grabbed"] = True
                     candidate.metadata["upgrade_last_searched_at"] = now_str
                     await self._repo.update_metadata(candidate.id, candidate.metadata)
-                    grabbed_total += 1
                     _LOGGER.info(
                         "Daily scan: grabbed upgrade for %s/%s: %s",
                         source,
@@ -234,6 +269,7 @@ class UpgradeScheduler:
                     candidate.metadata["upgrade_no_match_at"] = now_str
                     candidate.metadata["upgrade_last_searched_at"] = now_str
                     await self._repo.update_metadata(candidate.id, candidate.metadata)
+                await asyncio.sleep(upgrade.search_interval)
 
     async def _try_fill_from_source(
         self,
@@ -258,6 +294,14 @@ class UpgradeScheduler:
             )
             return False
 
+        if not candidates:
+            _LOGGER.debug(
+                "No due candidates for queue '%s' source '%s'",
+                queue_name,
+                source,
+            )
+            return False
+
         for candidate in candidates:
             if candidate.metadata.get("upgrade_grabbed"):
                 continue
@@ -265,6 +309,9 @@ class UpgradeScheduler:
                 continue
 
             now_str = datetime.now(UTC).isoformat()
+            _LOGGER.debug(
+                "Searching releases for %s/%s", source, candidate.source_id
+            )
             try:
                 releases = await self._search_releases(source, int(candidate.source_id))
                 matching = _filter_releases(releases, upgrade.accept_conditions)
@@ -275,7 +322,16 @@ class UpgradeScheduler:
                     candidate.source_id,
                     exc_info=True,
                 )
+                await asyncio.sleep(upgrade.search_interval)
                 continue
+
+            _LOGGER.debug(
+                "Found %d releases, %d matching conditions for %s/%s",
+                len(releases),
+                len(matching),
+                source,
+                candidate.source_id,
+            )
 
             if matching:
                 best = max(matching, key=lambda r: r.custom_format_score)
@@ -289,6 +345,7 @@ class UpgradeScheduler:
                         best.title,
                         exc_info=True,
                     )
+                    await asyncio.sleep(upgrade.search_interval)
                     continue
                 candidate.metadata["upgrade_grabbed"] = True
                 candidate.metadata["upgrade_last_searched_at"] = now_str
@@ -299,12 +356,14 @@ class UpgradeScheduler:
                     candidate.source_id,
                     best.title,
                 )
+                await asyncio.sleep(upgrade.search_interval)
                 return True
             else:
                 # No matching release found for this candidate
                 candidate.metadata["upgrade_no_match_at"] = now_str
                 candidate.metadata["upgrade_last_searched_at"] = now_str
                 await self._repo.update_metadata(candidate.id, candidate.metadata)
+                await asyncio.sleep(upgrade.search_interval)
 
         return False  # source exhausted
 
@@ -315,7 +374,9 @@ class UpgradeScheduler:
     async def _count_active(self, virtual_queue: str) -> int:
         """Count currently active job mappings for *virtual_queue*."""
         all_maps = await self._repo.get_all_job_maps()
-        return sum(1 for jm in all_maps if jm["virtual_queue"] == virtual_queue)
+        count = sum(1 for jm in all_maps if jm["virtual_queue"] == virtual_queue)
+        _LOGGER.debug("Queue '%s': %d active job(s)", virtual_queue, count)
+        return count
 
     # ------------------------------------------------------------------
     # Seed

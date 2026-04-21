@@ -152,6 +152,7 @@ class ConductarrEngine:
                 for vq in completed_queues:
                     if vq in self._upgrade_queue_names:
                         await self._upgrade_scheduler.on_job_completed(vq)
+                await self._upgrade_scheduler.on_reconcile_complete()
 
     async def _handle_event(self, event: ConductarrEvent) -> None:
         """Dispatch an event to the appropriate handler."""

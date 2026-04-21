@@ -46,6 +46,7 @@ def _make_queue_config(
     max_active: int = 2,
     retry_after_days: int = 7,
     accept_conditions: list[AcceptConditionConfig] | None = None,
+    search_interval: float = 0.0,
 ) -> VirtualQueueConfig:
     return VirtualQueueConfig(
         name=name,
@@ -57,6 +58,7 @@ def _make_queue_config(
             daily_scan_interval=86400,
             retry_after_days=retry_after_days,
             accept_conditions=accept_conditions or [],
+            search_interval=search_interval,
         ),
     )
 
@@ -101,10 +103,10 @@ async def _seed_item(
 
 
 class TestFilterReleases:
-    def test_no_conditions_returns_all_allowed(self) -> None:
+    def test_no_conditions_returns_all(self) -> None:
         releases = [
-            _make_release(guid="a", download_allowed=True),
-            _make_release(guid="b", download_allowed=True),
+            _make_release(guid="a"),
+            _make_release(guid="b"),
         ]
         assert _filter_releases(releases, []) == releases
 
@@ -389,9 +391,13 @@ class TestDailyScan:
         radarr.grab_release = AsyncMock()
 
         scheduler = UpgradeScheduler(repo, [qc], radarr_client=radarr)
+        # Simulate active count growing as grabs are committed to SABnzbd:
+        # outer-loop check → 0, candidate-1 check → 0, candidate-2 check → 1,
+        # candidate-3 check → 2 (at capacity, stop)
+        scheduler._count_active = AsyncMock(side_effect=[0, 0, 1, 2])  # type: ignore[method-assign]
         await scheduler._daily_scan(qc)
 
-        # max_active=2 → should grab at most 2 even though there are 3 candidates
+        # max_active=2 → should grab exactly 2 even though there are 3 candidates
         assert radarr.grab_release.await_count == 2
 
     async def test_skips_already_grabbed(self, repo: QueueRepository) -> None:
@@ -799,3 +805,76 @@ class TestSeedUpgradeQueues:
 
         assert await repo.get_item("radarr", "1") is not None
         assert await repo.get_item("sonarr", "101") is not None
+
+
+# ---------------------------------------------------------------------------
+# UpgradeScheduler.on_reconcile_complete
+# ---------------------------------------------------------------------------
+
+
+class TestOnReconcileComplete:
+    async def test_fills_queues_with_open_slots(self, repo: QueueRepository) -> None:
+        qc = _make_queue_config(sources=["radarr"], max_active=1)
+        await _seed_item(repo, "radarr", "1", "german_upgrade")
+
+        radarr = MagicMock()
+        radarr.search_releases = AsyncMock(return_value=[_make_release()])
+        radarr.grab_release = AsyncMock()
+
+        scheduler = UpgradeScheduler(repo, [qc], radarr_client=radarr)
+        await scheduler.on_reconcile_complete()
+
+        radarr.grab_release.assert_awaited_once()
+
+    async def test_skips_queues_at_capacity(self, repo: QueueRepository) -> None:
+        qc = _make_queue_config(sources=["radarr"], max_active=1)
+        await _seed_item(repo, "radarr", "1", "german_upgrade")
+
+        item = await repo.get_item("radarr", "1")
+        assert item is not None and item.id is not None
+        await repo.upsert_job_map("nzo-active", item.id, "german_upgrade")
+
+        radarr = MagicMock()
+        radarr.search_releases = AsyncMock(return_value=[_make_release()])
+        radarr.grab_release = AsyncMock()
+
+        scheduler = UpgradeScheduler(repo, [qc], radarr_client=radarr)
+        await scheduler.on_reconcile_complete()
+
+        radarr.grab_release.assert_not_awaited()
+
+    async def test_skips_disabled_queues(self, repo: QueueRepository) -> None:
+        qc = VirtualQueueConfig(
+            name="disabled",
+            priority=10,
+            upgrade=UpgradeConfig(enabled=False, sources=["radarr"]),
+        )
+        radarr = MagicMock()
+        radarr.grab_release = AsyncMock()
+
+        scheduler = UpgradeScheduler(repo, [qc], radarr_client=radarr)
+        await scheduler.on_reconcile_complete()
+
+        radarr.grab_release.assert_not_awaited()
+
+    async def test_handles_multiple_queues(self, repo: QueueRepository) -> None:
+        qc1 = _make_queue_config(name="queue_a", sources=["radarr"], max_active=1)
+        qc2 = _make_queue_config(name="queue_b", sources=["sonarr"], max_active=1)
+        await _seed_item(repo, "radarr", "1", "queue_a")
+        await _seed_item(repo, "sonarr", "10", "queue_b")
+
+        radarr = MagicMock()
+        radarr.search_releases = AsyncMock(return_value=[_make_release(guid="r1")])
+        radarr.grab_release = AsyncMock()
+
+        sonarr = MagicMock()
+        sonarr.search_releases = AsyncMock(return_value=[_make_release(guid="s1")])
+        sonarr.grab_release = AsyncMock()
+
+        scheduler = UpgradeScheduler(
+            repo, [qc1, qc2], radarr_client=radarr, sonarr_client=sonarr
+        )
+        await scheduler.on_reconcile_complete()
+
+        radarr.grab_release.assert_awaited_once()
+        sonarr.grab_release.assert_awaited_once()
