@@ -250,11 +250,21 @@ class SABnzbdClient:
     async def switch(self, nzo_id: str, other_nzo_id: str) -> tuple[int, int]:
         """Move *nzo_id* to directly above *other_nzo_id*.
 
-        Returns ``(position, priority)`` from the ``result`` field.
+        Returns ``(position, priority)`` from the ``result`` field, or
+        ``(-1, -1)`` when the response is not in the expected list format
+        (some SABnzbd versions return ``{"result": "ok"}`` or a bare number).
         """
         data = await self._request(mode="switch", value=nzo_id, value2=other_nzo_id)
-        result = data["result"]
-        return (int(result[0]), int(result[1]))
+        result = data.get("result")
+        if isinstance(result, list) and len(result) >= 2:
+            return (int(result[0]), int(result[1]))
+        _LOGGER.debug(
+            "switch(%s, %s) returned unexpected result format: %r",
+            nzo_id,
+            other_nzo_id,
+            result,
+        )
+        return (-1, -1)
 
     async def pause_queue(self) -> bool:
         """Pause the entire download queue."""

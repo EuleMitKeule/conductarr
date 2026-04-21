@@ -312,6 +312,7 @@ class VirtualQueueConfig:
     name: str
     priority: int
     enabled: bool = True
+    fallback: bool = False
     matchers: list[MatcherConfig] = field(default_factory=list)
     upgrade: UpgradeConfig | None = None
 
@@ -391,6 +392,7 @@ class ConductarrConfig:
                     name=q["name"],
                     priority=int(q["priority"]),
                     enabled=q.get("enabled", True),
+                    fallback=bool(q.get("fallback", False)),
                     matchers=matchers,
                     upgrade=upgrade,
                 )

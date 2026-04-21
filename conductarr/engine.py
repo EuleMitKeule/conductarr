@@ -76,6 +76,7 @@ class ConductarrEngine:
                 name=q.name,
                 priority=q.priority,
                 enabled=q.enabled,
+                fallback=q.fallback,
                 matchers=[{"type": m.type, "tags": m.tags} for m in q.matchers],
             )
             for q in config.queues
@@ -147,12 +148,21 @@ class ConductarrEngine:
         radarr = self._monitor.last_radarr_queue
         sonarr = self._monitor.last_sonarr_queue
         if sab is not None and radarr is not None and sonarr is not None:
-            completed_queues = await self._queue_manager.reconcile(sab, radarr, sonarr)
+            try:
+                completed_queues = await self._queue_manager.reconcile(
+                    sab, radarr, sonarr
+                )
+            except Exception:
+                _LOGGER.exception("Error during queue reconcile")
+                return
             if self._upgrade_scheduler is not None:
-                for vq in completed_queues:
-                    if vq in self._upgrade_queue_names:
-                        await self._upgrade_scheduler.on_job_completed(vq)
-                await self._upgrade_scheduler.on_reconcile_complete()
+                try:
+                    for vq in completed_queues:
+                        if vq in self._upgrade_queue_names:
+                            await self._upgrade_scheduler.on_job_completed(vq)
+                    await self._upgrade_scheduler.on_reconcile_complete()
+                except Exception:
+                    _LOGGER.exception("Error in upgrade scheduler post-reconcile")
 
     async def _handle_event(self, event: ConductarrEvent) -> None:
         """Dispatch an event to the appropriate handler."""

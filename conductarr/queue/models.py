@@ -14,6 +14,7 @@ class VirtualQueue:
     name: str
     priority: int
     enabled: bool = True
+    fallback: bool = False
     matchers: list[dict[str, Any]] = field(default_factory=list)
 
 

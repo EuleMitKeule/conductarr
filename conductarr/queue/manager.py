@@ -36,8 +36,21 @@ class QueueManager:
         )
 
     async def assign_queue(self, item: QueueItem) -> QueueItem:
-        """Assign an item to the highest-priority matching virtual queue."""
+        """Assign an item to the highest-priority matching virtual queue.
+
+        Non-fallback queues are evaluated first in priority order.  If nothing
+        matches, the item falls through to the highest-priority fallback queue
+        (if one is configured).  Items that match neither are still persisted
+        without a virtual queue assignment.
+        """
+        fallback_queue: str | None = None
         for vq in self._virtual_queues:
+            if vq.fallback:
+                # Record the first (highest-priority) fallback but keep scanning
+                # in case a non-fallback queue matches later.
+                if fallback_queue is None:
+                    fallback_queue = vq.name
+                continue
             for matcher_config in vq.matchers:
                 matcher_type = matcher_config.get("type")
                 matcher_cls = MATCHER_REGISTRY.get(matcher_type)  # type: ignore[arg-type]
@@ -55,7 +68,17 @@ class QueueManager:
                     )
                     return await self._repo.upsert_item(item)
 
-        # No queue matched — still persist the item
+        if fallback_queue is not None:
+            item.virtual_queue = fallback_queue
+            _LOGGER.info(
+                "Item %s/%s assigned to fallback queue '%s'",
+                item.source,
+                item.source_id,
+                fallback_queue,
+            )
+            return await self._repo.upsert_item(item)
+
+        # No queue matched at all — still persist the item
         _LOGGER.debug(
             "Item %s/%s did not match any virtual queue",
             item.source,
@@ -248,7 +271,15 @@ class QueueManager:
                     continue
                 # Move target_id to directly above the job currently at position i.
                 current_at_i = live_order[i]
-                await self._sabnzbd.switch(target_id, current_at_i)
+                try:
+                    await self._sabnzbd.switch(target_id, current_at_i)
+                except Exception:
+                    _LOGGER.exception(
+                        "Failed to switch %s above %s; aborting reorder",
+                        target_id,
+                        current_at_i,
+                    )
+                    return
                 j = live_order.index(target_id)
                 live_order.pop(j)
                 live_order.insert(i, target_id)
@@ -269,10 +300,16 @@ class QueueManager:
         top_slot = slot_by_id.get(top_id)
         if top_slot is not None and top_slot.status == "Paused":
             _LOGGER.info("Resuming top slot %s", top_id)
-            await self._sabnzbd.resume_job(top_id)
+            try:
+                await self._sabnzbd.resume_job(top_id)
+            except Exception:
+                _LOGGER.exception("Failed to resume top slot %s", top_id)
 
         for nzo_id in desired_order[1:]:
             slot = slot_by_id.get(nzo_id)
             if slot is not None and slot.status in _PAUSABLE_STATUSES:
                 _LOGGER.info("Pausing non-top slot %s (status=%s)", nzo_id, slot.status)
-                await self._sabnzbd.pause_job(nzo_id)
+                try:
+                    await self._sabnzbd.pause_job(nzo_id)
+                except Exception:
+                    _LOGGER.exception("Failed to pause non-top slot %s", nzo_id)

@@ -75,7 +75,12 @@ class SabnzbdMonitor:
 
     async def _run(self) -> None:
         while True:
-            await self._poll()
+            try:
+                await self._poll()
+            except Exception:
+                _LOGGER.exception(
+                    "Unhandled error in poll cycle; will retry next interval"
+                )
             await asyncio.sleep(self._poll_interval)
 
     async def _poll(self) -> None:
@@ -129,7 +134,10 @@ class SabnzbdMonitor:
             await self._diff_sonarr(sonarr_result, now)
 
         if self._on_cycle_complete is not None:
-            await self._on_cycle_complete()
+            try:
+                await self._on_cycle_complete()
+            except Exception:
+                _LOGGER.exception("Error in on_cycle_complete callback")
 
     # ------------------------------------------------------------------
     # Poll helpers (fetch only — may raise)

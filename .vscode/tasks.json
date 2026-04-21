@@ -47,6 +47,28 @@
             "command": "docker compose -f docker-compose.dev.yml down"
         },
         {
+            "label": "Prod Flow",
+            "dependsOn": [
+                "Start Prod Stack"
+            ],
+            "dependsOrder": "sequence"
+        },
+        {
+            "label": "Start Prod Stack",
+            "type": "shell",
+            "command": "docker compose -f docker-compose.prod-test.yml up --build",
+            "presentation": {
+                "panel": "dedicated",
+                "reveal": "always",
+                "group": "prod"
+            }
+        },
+        {
+            "label": "Stop Prod Stack",
+            "type": "shell",
+            "command": "docker compose -f docker-compose.prod-test.yml down"
+        },
+        {
             "label": "Run Example Flow",
             "type": "shell",
             "command": "powershell -ExecutionPolicy Bypass -File scripts/run_example_flow.ps1",

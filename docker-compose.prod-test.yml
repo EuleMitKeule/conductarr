@@ -1,0 +1,13 @@
+services:
+  conductarr:
+    build: .
+    container_name: conductarr-prod-test
+    environment:
+      PUID: 1000
+      PGID: 1000
+      UMASK: "022"
+      TZ: UTC
+      LOG_LEVEL: debug
+    volumes:
+      - ./config-prod:/config
+    command: conductarr watch
