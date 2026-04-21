@@ -52,6 +52,15 @@ class UpgradeScheduler:
 
     async def start(self) -> None:
         """Start per-queue daily scan loops."""
+        await self.seed_upgrade_queues()
+        for qc in self._upgrade_queues:
+            if qc.upgrade and qc.upgrade.enabled:
+                try:
+                    await self._fill_slots(qc)
+                except Exception:
+                    _LOGGER.exception(
+                        "Error filling slots on startup for queue '%s'", qc.name
+                    )
         for qc in self._upgrade_queues:
             if qc.upgrade and qc.upgrade.enabled:
                 task = asyncio.create_task(
@@ -62,15 +71,6 @@ class UpgradeScheduler:
         _LOGGER.info(
             "UpgradeScheduler started (%d upgrade queue(s))", len(self._daily_tasks)
         )
-        await self.seed_upgrade_queues()
-        for qc in self._upgrade_queues:
-            if qc.upgrade and qc.upgrade.enabled:
-                try:
-                    await self._fill_slots(qc)
-                except Exception:
-                    _LOGGER.exception(
-                        "Error filling slots on startup for queue '%s'", qc.name
-                    )
 
     async def stop(self) -> None:
         """Cancel all running daily scan tasks."""
