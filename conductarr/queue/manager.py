@@ -76,7 +76,7 @@ class QueueManager:
         sab_queue: Queue,
         radarr_queue: list[RadarrQueueItem],
         sonarr_queue: list[SonarrQueueItem],
-    ) -> None:
+    ) -> list[str]:
         """Cross-reference SABnzbd slots with Radarr/Sonarr queue items.
 
         For each SABnzbd slot whose nzo_id matches a Radarr or Sonarr
@@ -85,6 +85,8 @@ class QueueManager:
 
         For slots that have disappeared from SABnzbd (job finished/cancelled),
         marks the linked queue item as completed and removes the mapping.
+
+        Returns the virtual-queue names of all jobs that completed this cycle.
         """
         radarr_by_nzo = {
             item.download_id: item for item in radarr_queue if item.download_id
@@ -160,6 +162,7 @@ class QueueManager:
                 )
 
         # Mark completed jobs whose nzo_ids are no longer in SABnzbd
+        completed_virtual_queues: list[str] = []
         all_maps = await self._repo.get_all_job_maps()
         for job_map in all_maps:
             nzo_id = job_map["nzo_id"]
@@ -172,10 +175,15 @@ class QueueManager:
                         nzo_id,
                         queue_item_id,
                     )
+                vq = job_map.get("virtual_queue", "")
+                if vq:
+                    completed_virtual_queues.append(vq)
                 await self._repo.delete_job_map(nzo_id)
 
         # Reorder queue by virtual-queue priority and enforce one active download.
         await self._reorder_and_enforce_active(sab_queue)
+
+        return completed_virtual_queues
 
     async def get_next_for_queue(self, virtual_queue: str) -> QueueItem | None:
         """Return the next pending item for a virtual queue using rotation order."""

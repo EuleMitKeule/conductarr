@@ -81,6 +81,51 @@ class QueueRepository:
             (status, item_id),
         )
 
+    async def update_metadata(self, item_id: int, metadata: dict[str, Any]) -> None:
+        """Overwrite the metadata JSON for a queue item."""
+        await self._db.execute(
+            """
+            UPDATE queue_items
+            SET metadata = ?, updated_at = datetime('now')
+            WHERE id = ?
+            """,
+            (json.dumps(metadata), item_id),
+        )
+
+    async def get_upgrade_candidates(
+        self,
+        virtual_queue: str,
+        source: str,
+        retry_after_days: int,
+    ) -> list[QueueItem]:
+        """Return items eligible for an upgrade search.
+
+        An item is a candidate when:
+        - It belongs to *virtual_queue* and *source*.
+        - ``upgrade_grabbed`` is not ``true`` (or absent).
+        - ``upgrade_last_searched_at`` is NULL **or** older than
+          ``now - retry_after_days``.
+        Items are ordered numerically by *source_id* (ascending).
+        """
+        rows = await self._db.fetchall(
+            """
+            SELECT * FROM queue_items
+            WHERE virtual_queue = ?
+              AND source = ?
+              AND (
+                json_extract(metadata, '$.upgrade_grabbed') IS NOT 1
+              )
+              AND (
+                json_extract(metadata, '$.upgrade_last_searched_at') IS NULL
+                OR datetime(json_extract(metadata, '$.upgrade_last_searched_at'))
+                   < datetime('now', '-' || ? || ' days')
+              )
+            ORDER BY CAST(source_id AS INTEGER) ASC
+            """,
+            (virtual_queue, source, str(retry_after_days)),
+        )
+        return [self._row_to_item(r) for r in rows]
+
     async def increment_attempts(self, item_id: int) -> None:
         """Increment attempts and set last_tried_at for rotation."""
         await self._db.execute(

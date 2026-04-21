@@ -57,6 +57,7 @@ from conductarr.const import (
 )
 
 __all__ = [
+    "AcceptConditionConfig",
     "AnyDatabaseConfig",
     "ConductarrConfig",
     "ConfigError",
@@ -67,6 +68,7 @@ __all__ = [
     "SabnzbdConfig",
     "SonarrConfig",
     "SQLiteDatabaseConfig",
+    "UpgradeConfig",
     "VirtualQueueConfig",
 ]
 
@@ -284,11 +286,33 @@ class MatcherConfig:
 
 
 @dataclass
+class AcceptConditionConfig:
+    """A single condition that a release must satisfy to be eligible for upgrade."""
+
+    type: str  # "custom_format" | "custom_format_min_score"
+    name: str = ""  # used by custom_format
+    value: int = 0  # used by custom_format_min_score
+
+
+@dataclass
+class UpgradeConfig:
+    """Upgrade-scheduler settings attached to a virtual queue."""
+
+    enabled: bool = True
+    sources: list[str] = field(default_factory=lambda: ["radarr", "sonarr"])
+    max_active: int = 1
+    daily_scan_interval: int = 86400  # seconds
+    retry_after_days: int = 7
+    accept_conditions: list[AcceptConditionConfig] = field(default_factory=list)
+
+
+@dataclass
 class VirtualQueueConfig:
     name: str
     priority: int
     enabled: bool = True
     matchers: list[MatcherConfig] = field(default_factory=list)
+    upgrade: UpgradeConfig | None = None
 
 
 @dataclass
@@ -340,12 +364,33 @@ class ConductarrConfig:
         queues: list[VirtualQueueConfig] = []
         for q in data.get("queues", []):
             matchers = [MatcherConfig(**m) for m in q.get("matchers", [])]
+            upgrade: UpgradeConfig | None = None
+            if raw_upgrade := q.get("upgrade"):
+                conditions = [
+                    AcceptConditionConfig(
+                        type=c["type"],
+                        name=c.get("name", ""),
+                        value=int(c.get("value", 0)),
+                    )
+                    for c in raw_upgrade.get("accept_conditions", [])
+                ]
+                upgrade = UpgradeConfig(
+                    enabled=bool(raw_upgrade.get("enabled", True)),
+                    sources=list(raw_upgrade.get("sources", ["radarr", "sonarr"])),
+                    max_active=int(raw_upgrade.get("max_active", 1)),
+                    daily_scan_interval=int(
+                        raw_upgrade.get("daily_scan_interval", 86400)
+                    ),
+                    retry_after_days=int(raw_upgrade.get("retry_after_days", 7)),
+                    accept_conditions=conditions,
+                )
             queues.append(
                 VirtualQueueConfig(
                     name=q["name"],
                     priority=int(q["priority"]),
                     enabled=q.get("enabled", True),
                     matchers=matchers,
+                    upgrade=upgrade,
                 )
             )
 

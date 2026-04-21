@@ -14,6 +14,8 @@ from pyarr.exceptions import (
     PyarrUnauthorizedError,
 )
 
+from conductarr.clients.release import ReleaseResult
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -226,8 +228,55 @@ class RadarrClient:
         return [tag_map[tid] for tid in tag_ids if tid in tag_map]
 
     # ------------------------------------------------------------------
+    # Releases
+    # ------------------------------------------------------------------
+
+    async def search_releases(self, movie_id: int) -> list[ReleaseResult]:
+        """Search for available releases for *movie_id* via GET /api/v3/release."""
+        try:
+            raw = await self._get_api().release.get(movie_id=movie_id)
+        except PyarrUnauthorizedError as exc:
+            raise RadarrAuthError(str(exc)) from exc
+        except (PyarrConnectionError, ConnectionError, OSError) as exc:
+            raise RadarrConnectionError(str(exc)) from exc
+        except Exception as exc:
+            raise RadarrError(str(exc)) from exc
+
+        return [self._to_release(item) for item in raw]
+
+    async def grab_release(self, release: ReleaseResult) -> None:
+        """Force-grab *release* via POST /api/v3/release."""
+        payload: dict[str, Any] = {
+            "guid": release.guid,
+            "indexerId": release.indexer_id,
+        }
+        try:
+            await self._get_api().http_utils.request(
+                "release", method="POST", json_data=payload
+            )
+        except PyarrUnauthorizedError as exc:
+            raise RadarrAuthError(str(exc)) from exc
+        except (PyarrConnectionError, ConnectionError, OSError) as exc:
+            raise RadarrConnectionError(str(exc)) from exc
+        except Exception as exc:
+            raise RadarrError(str(exc)) from exc
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _to_release(data: dict[str, Any]) -> ReleaseResult:
+        return ReleaseResult(
+            guid=data.get("guid", ""),
+            title=data.get("title", ""),
+            indexer_id=data.get("indexerId", 0),
+            custom_formats=[cf.get("name", "") for cf in data.get("customFormats", [])],
+            custom_format_score=data.get("customFormatScore", 0),
+            quality=data.get("quality", {}).get("quality", {}).get("name", ""),
+            size=data.get("size", 0),
+            download_allowed=data.get("downloadAllowed", True),
+        )
 
     @staticmethod
     def _to_movie(data: dict[str, Any]) -> RadarrMovie:

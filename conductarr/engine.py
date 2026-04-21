@@ -30,6 +30,7 @@ from conductarr.events import (
 from conductarr.monitor import SabnzbdMonitor
 from conductarr.queue.manager import QueueManager
 from conductarr.queue.models import VirtualQueue
+from conductarr.upgrade.scheduler import UpgradeScheduler
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,6 +88,24 @@ class ConductarrEngine:
             sabnzbd_client=self._client,
         )
 
+        # Upgrade scheduler — only instantiated when at least one upgrade queue exists
+        upgrade_queue_configs = [
+            q for q in config.queues if q.upgrade is not None and q.upgrade.enabled
+        ]
+        self._upgrade_scheduler: UpgradeScheduler | None = (
+            UpgradeScheduler(
+                self._repo,
+                upgrade_queue_configs,
+                radarr_client=self._radarr_client,
+                sonarr_client=self._sonarr_client,
+            )
+            if upgrade_queue_configs
+            else None
+        )
+        self._upgrade_queue_names: frozenset[str] = frozenset(
+            q.name for q in upgrade_queue_configs
+        )
+
     async def connect(self) -> None:
         """Connect the database and HTTP client without starting the watch loop."""
         await self._db.connect()
@@ -96,10 +115,14 @@ class ConductarrEngine:
         """Start the monitor and begin processing events."""
         await self.connect()
         await self._monitor.start()
+        if self._upgrade_scheduler is not None:
+            await self._upgrade_scheduler.start()
         _LOGGER.info("Conductarr engine started")
 
     async def stop(self) -> None:
         """Stop the monitor and close the client session."""
+        if self._upgrade_scheduler is not None:
+            await self._upgrade_scheduler.stop()
         await self._monitor.stop()
         await self._client.__aexit__(None, None, None)
         await self._db.disconnect()
@@ -119,7 +142,11 @@ class ConductarrEngine:
         radarr = self._monitor.last_radarr_queue
         sonarr = self._monitor.last_sonarr_queue
         if sab is not None and radarr is not None and sonarr is not None:
-            await self._queue_manager.reconcile(sab, radarr, sonarr)
+            completed_queues = await self._queue_manager.reconcile(sab, radarr, sonarr)
+            if self._upgrade_scheduler is not None:
+                for vq in completed_queues:
+                    if vq in self._upgrade_queue_names:
+                        await self._upgrade_scheduler.on_job_completed(vq)
 
     async def _handle_event(self, event: ConductarrEvent) -> None:
         """Dispatch an event to the appropriate handler."""
