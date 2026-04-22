@@ -915,59 +915,63 @@ class TestFillSlotsLock:
 
 
 # ---------------------------------------------------------------------------
-# UpgradeScheduler._pending_grabs
+# UpgradeScheduler pending-grab tracking (DB-backed)
 # ---------------------------------------------------------------------------
 
 
 class TestPendingGrabs:
-    async def test_grab_adds_to_pending(self, repo: QueueRepository) -> None:
+    async def test_grab_sets_upgrade_grabbed_in_db(self, repo: QueueRepository) -> None:
+        """After a successful grab, upgrade_grabbed is persisted in the DB."""
         qc = _make_queue_config(sources=["radarr"], max_active=2)
-        await _seed_item(repo, "radarr", "1", "german_upgrade")
+        item = await _seed_item(repo, "radarr", "1", "german_upgrade")
 
         radarr = MagicMock()
         radarr.search_releases = AsyncMock(return_value=[_make_release()])
         radarr.grab_release = AsyncMock()
 
         scheduler = UpgradeScheduler(repo, [qc], radarr_client=radarr)
-        assert len(scheduler._pending_grabs) == 0
-
         await scheduler._fill_slots(qc)
 
         radarr.grab_release.assert_awaited_once()
-        assert len(scheduler._pending_grabs) == 1
+        assert item.id is not None
+        refreshed = await repo.get_item_by_id(item.id)
+        assert refreshed is not None
+        assert refreshed.metadata.get("upgrade_grabbed") is True
+        assert refreshed.metadata.get("upgrade_grabbed_at") is not None
 
     async def test_pending_counted_as_active(self, repo: QueueRepository) -> None:
-        """A grab in _pending_grabs is counted as an active slot."""
+        """A DB-persisted grab is counted as an active slot via count_grabbed_not_in_jobmap."""
         qc = _make_queue_config(sources=["radarr"], max_active=1)
         item = await _seed_item(repo, "radarr", "1", "german_upgrade")
         assert item.id is not None
         scheduler = UpgradeScheduler(repo, [qc], radarr_client=MagicMock())
 
-        # Manually add a pending grab — no job_map row exists yet
-        scheduler._pending_grabs.add(("german_upgrade", item.id))
+        # Simulate a persisted grab with no job_map row yet
+        item.metadata["upgrade_grabbed"] = True
+        await repo.update_metadata(item.id, item.metadata)
 
         count = await scheduler._count_active("german_upgrade")
         assert count == 1
 
-    async def test_pending_pruned_when_job_map_appears(
+    async def test_pending_not_double_counted_when_job_map_appears(
         self, repo: QueueRepository
     ) -> None:
-        """Once the job_map row is created the pending entry is removed."""
+        """Once the job_map row is created the pending entry is no longer counted separately."""
         qc = _make_queue_config(sources=["radarr"], max_active=2)
         item = await _seed_item(repo, "radarr", "1", "german_upgrade")
         assert item.id is not None
         scheduler = UpgradeScheduler(repo, [qc], radarr_client=MagicMock())
 
-        scheduler._pending_grabs.add(("german_upgrade", item.id))
-        assert len(scheduler._pending_grabs) == 1
+        # Persist the grab flag
+        item.metadata["upgrade_grabbed"] = True
+        await repo.update_metadata(item.id, item.metadata)
 
         # Simulate SABnzbd picking up the download → job_map row created
         await repo.upsert_job_map("nzo-123", item.id, "german_upgrade")
 
         count = await scheduler._count_active("german_upgrade")
-        # job_map has 1 entry; pending was pruned → still 1, no double-count
+        # job_map has 1 entry; count_grabbed_not_in_jobmap returns 0 → total = 1
         assert count == 1
-        assert len(scheduler._pending_grabs) == 0
 
     async def test_pending_not_double_counted_after_job_map(
         self, repo: QueueRepository
@@ -983,12 +987,14 @@ class TestPendingGrabs:
 
         scheduler = UpgradeScheduler(repo, [qc], radarr_client=radarr)
         await scheduler._fill_slots(qc)
-        # Pending grab is recorded
-        assert len(scheduler._pending_grabs) == 1
+
+        # Grab was persisted in the DB
+        refreshed = await repo.get_item_by_id(item.id)
+        assert refreshed is not None
+        assert refreshed.metadata.get("upgrade_grabbed") is True
 
         # SABnzbd picks it up
         await repo.upsert_job_map("nzo-456", item.id, "german_upgrade")
 
         count = await scheduler._count_active("german_upgrade")
-        assert count == 1  # job_map (1) + pending (0, pruned) = 1
-        assert len(scheduler._pending_grabs) == 0
+        assert count == 1  # job_map (1) + pending (0, now in job_map) = 1

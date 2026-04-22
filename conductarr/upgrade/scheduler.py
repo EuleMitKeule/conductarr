@@ -47,10 +47,6 @@ class UpgradeScheduler:
         self._daily_tasks: list[asyncio.Task[None]] = []
         # Prevents concurrent _fill_slots calls from over-filling a queue
         self._fill_lock = asyncio.Lock()
-        # Tracks grabs sent to the indexer but not yet reflected in job_map.
-        # Stored as (queue_name, queue_item_id) so _count_active can treat them
-        # as occupied slots until SABnzbd picks up the download.
-        self._pending_grabs: set[tuple[str, int]] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -104,19 +100,16 @@ class UpgradeScheduler:
             if qc.upgrade is None or not qc.upgrade.enabled:
                 continue
             active = await self._count_active(qc.name)
-            slots_to_fill = qc.upgrade.max_active - active
             _LOGGER.debug(
-                "Queue '%s': %d/%d active, %d slot(s) to fill",
+                "Reconcile complete check for '%s': active=%d max=%d",
                 qc.name,
                 active,
                 qc.upgrade.max_active,
-                slots_to_fill,
             )
-            if slots_to_fill > 0:
-                try:
-                    await self._fill_slots(qc)
-                except Exception:
-                    _LOGGER.exception("Error filling slots for queue '%s'", qc.name)
+            try:
+                await self._fill_slots(qc)
+            except Exception:
+                _LOGGER.exception("Error filling slots for queue '%s'", qc.name)
 
     # ------------------------------------------------------------------
     # Internal loops
@@ -149,6 +142,14 @@ class UpgradeScheduler:
 
         async with self._fill_lock:
             active = await self._count_active(queue_config.name)
+            pending_grabbed = await self._repo.count_grabbed_not_in_jobmap(
+                queue_config.name
+            )
+            _LOGGER.debug(
+                "Fill requested for '%s': pending_grabs=%r",
+                queue_config.name,
+                pending_grabbed,
+            )
             _LOGGER.debug(
                 "Filling slots for queue '%s': %d/%d active",
                 queue_config.name,
@@ -262,9 +263,9 @@ class UpgradeScheduler:
                         await asyncio.sleep(upgrade.search_interval)
                         continue
                     candidate.metadata["upgrade_grabbed"] = True
+                    candidate.metadata["upgrade_grabbed_at"] = now_str
                     candidate.metadata["upgrade_last_searched_at"] = now_str
                     await self._repo.update_metadata(candidate.id, candidate.metadata)
-                    self._pending_grabs.add((queue_name, candidate.id))
                     _LOGGER.info(
                         "Daily scan: grabbed upgrade for %s/%s: %s",
                         source,
@@ -352,9 +353,9 @@ class UpgradeScheduler:
                     await asyncio.sleep(upgrade.search_interval)
                     continue
                 candidate.metadata["upgrade_grabbed"] = True
+                candidate.metadata["upgrade_grabbed_at"] = now_str
                 candidate.metadata["upgrade_last_searched_at"] = now_str
                 await self._repo.update_metadata(candidate.id, candidate.metadata)
-                self._pending_grabs.add((queue_name, candidate.id))
                 _LOGGER.info(
                     "Grabbed upgrade for %s/%s: %s",
                     source,
@@ -379,22 +380,28 @@ class UpgradeScheduler:
     async def _count_active(self, virtual_queue: str) -> int:
         """Count currently active job mappings for *virtual_queue*.
 
-        Includes grabs that were sent to the indexer but have not yet appeared
-        in the SABnzbd job_map (``_pending_grabs``).  Entries are pruned from
-        ``_pending_grabs`` as soon as their corresponding job_map row exists,
-        preventing double-counting.
+        Adds grabs that are persisted in the DB as ``upgrade_grabbed=True``
+        but whose nzo_id has not yet appeared in the job_map.  This is
+        restart-safe because the flag is written to the DB before the grab
+        call returns.
         """
         all_maps = await self._repo.get_all_job_maps()
-        # Prune pending entries that are now tracked in the job_map
-        if self._pending_grabs:
-            committed_ids = {jm["queue_item_id"] for jm in all_maps}
-            self._pending_grabs = {
-                pg for pg in self._pending_grabs if pg[1] not in committed_ids
-            }
         job_map_count = sum(
             1 for jm in all_maps if jm["virtual_queue"] == virtual_queue
         )
-        pending_count = sum(1 for pg in self._pending_grabs if pg[0] == virtual_queue)
+        for jm in all_maps:
+            _LOGGER.debug(
+                "_count_active job_map entry: nzo_id=%s virtual_queue=%s queue_item_id=%s",
+                jm["nzo_id"],
+                jm["virtual_queue"],
+                jm["queue_item_id"],
+            )
+        pending_count = await self._repo.count_grabbed_not_in_jobmap(virtual_queue)
+        _LOGGER.debug(
+            "_count_active pending_grabbed entries for '%s': %d",
+            virtual_queue,
+            pending_count,
+        )
         total = job_map_count + pending_count
         _LOGGER.debug(
             "Queue '%s': %d active job(s) (%d in job_map, %d pending)",

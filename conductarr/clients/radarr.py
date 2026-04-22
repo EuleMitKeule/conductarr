@@ -111,6 +111,7 @@ class RadarrClient:
 
     async def get_queue(self) -> list[RadarrQueueItem]:
         """Return all current Radarr queue items."""
+        _LOGGER.debug("Radarr get_queue: fetching up to 1000 records")
         try:
             data = await self._get_api().queue.get(page_size=1000)
         except PyarrUnauthorizedError as exc:
@@ -120,7 +121,7 @@ class RadarrClient:
         except Exception as exc:
             raise RadarrError(str(exc)) from exc
 
-        return [
+        records = [
             RadarrQueueItem(
                 download_id=item.get("downloadId", ""),
                 movie_id=item.get("movieId", 0),
@@ -131,6 +132,8 @@ class RadarrClient:
             )
             for item in data.get("records", [])
         ]
+        _LOGGER.debug("Radarr get_queue: got %d records", len(records))
+        return records
 
     # ------------------------------------------------------------------
     # Movies
@@ -143,6 +146,11 @@ class RadarrClient:
         has_file: bool | None = None,
     ) -> list[RadarrMovie]:
         """Return movies, optionally filtered by *monitored* and *has_file*."""
+        _LOGGER.debug(
+            "Radarr get_movies: fetching all movies (monitored=%s, has_file=%s)",
+            monitored,
+            has_file,
+        )
         try:
             raw = cast(list[dict[str, Any]], await self._get_api().movie.get())
         except PyarrUnauthorizedError as exc:
@@ -157,15 +165,18 @@ class RadarrClient:
             movies = [m for m in movies if m.monitored is monitored]
         if has_file is not None:
             movies = [m for m in movies if m.has_file is has_file]
+        _LOGGER.debug("Radarr get_movies: got %d movies", len(movies))
         return movies
 
     async def get_movie(self, movie_id: int) -> RadarrMovie | None:
         """Look up a single movie by ID.  Returns ``None`` if not found."""
+        _LOGGER.debug("Radarr get_movie: movie_id=%d", movie_id)
         try:
             raw = cast(
                 dict[str, Any], await self._get_api().movie.get(item_id=movie_id)
             )
         except PyarrResourceNotFound:
+            _LOGGER.debug("Radarr get_movie: movie_id=%d not found", movie_id)
             return None
         except PyarrUnauthorizedError as exc:
             raise RadarrAuthError(str(exc)) from exc
@@ -174,7 +185,9 @@ class RadarrClient:
         except Exception as exc:
             raise RadarrError(str(exc)) from exc
 
-        return self._to_movie(raw)
+        movie = self._to_movie(raw)
+        _LOGGER.debug("Radarr get_movie: found '%s'", movie.title)
+        return movie
 
     # ------------------------------------------------------------------
     # Commands
@@ -187,6 +200,7 @@ class RadarrClient:
             This initiates an actual download search in Radarr.  Only call
             from the :class:`~conductarr.upgrade.scheduler.UpgradeScheduler`.
         """
+        _LOGGER.debug("Radarr trigger_search: movie_id=%d", movie_id)
         try:
             await self._get_api().command.execute("MoviesSearch", movieIds=[movie_id])
         except PyarrUnauthorizedError as exc:
@@ -195,6 +209,9 @@ class RadarrClient:
             raise RadarrConnectionError(str(exc)) from exc
         except Exception as exc:
             raise RadarrError(str(exc)) from exc
+        _LOGGER.debug(
+            "Radarr trigger_search: command dispatched for movie_id=%d", movie_id
+        )
         return True
 
     # ------------------------------------------------------------------
@@ -203,6 +220,7 @@ class RadarrClient:
 
     async def get_tags(self) -> dict[int, str]:
         """Return a mapping of tag_id → label for all Radarr tags."""
+        _LOGGER.debug("Radarr get_tags: fetching all tags")
         try:
             raw = cast(list[dict[str, Any]], await self._get_api().tag.get())
         except PyarrUnauthorizedError as exc:
@@ -211,10 +229,13 @@ class RadarrClient:
             raise RadarrConnectionError(str(exc)) from exc
         except Exception as exc:
             raise RadarrError(str(exc)) from exc
-        return {t["id"]: t["label"] for t in raw}
+        tag_map = {t["id"]: t["label"] for t in raw}
+        _LOGGER.debug("Radarr get_tags: got %d tag(s)", len(tag_map))
+        return tag_map
 
     async def get_movie_tags(self, movie_id: int) -> list[str]:
         """Return tag labels for the given movie."""
+        _LOGGER.debug("Radarr get_movie_tags: movie_id=%d", movie_id)
         try:
             raw = cast(
                 dict[str, Any], await self._get_api().movie.get(item_id=movie_id)
@@ -232,7 +253,11 @@ class RadarrClient:
         if not tag_ids:
             return []
         tag_map = await self.get_tags()
-        return [tag_map[tid] for tid in tag_ids if tid in tag_map]
+        tags = [tag_map[tid] for tid in tag_ids if tid in tag_map]
+        _LOGGER.debug(
+            "Radarr get_movie_tags: movie_id=%d has %d tag(s)", movie_id, len(tags)
+        )
+        return tags
 
     # ------------------------------------------------------------------
     # Releases
@@ -240,6 +265,7 @@ class RadarrClient:
 
     async def search_releases(self, movie_id: int) -> list[ReleaseResult]:
         """Search for available releases for *movie_id* via GET /api/v3/release."""
+        _LOGGER.debug("Radarr search_releases: movie_id=%d", movie_id)
         try:
             raw = await self._get_api().release.get(movie_id=movie_id)
         except PyarrUnauthorizedError as exc:
@@ -249,10 +275,19 @@ class RadarrClient:
         except Exception as exc:
             raise RadarrError(str(exc)) from exc
 
-        return [self._to_release(item) for item in raw]
+        results = [self._to_release(item) for item in raw]
+        _LOGGER.debug(
+            "Radarr search_releases: movie_id=%d got %d release(s)",
+            movie_id,
+            len(results),
+        )
+        return results
 
     async def grab_release(self, release: ReleaseResult) -> None:
         """Force-grab *release* via POST /api/v3/release."""
+        _LOGGER.debug(
+            "Radarr grab_release: guid=%s title='%s'", release.guid, release.title
+        )
         try:
             await self._get_api().release.add(release.guid, release.indexer_id)
         except PyarrUnauthorizedError as exc:
@@ -261,6 +296,7 @@ class RadarrClient:
             raise RadarrConnectionError(str(exc)) from exc
         except Exception as exc:
             raise RadarrError(str(exc)) from exc
+        _LOGGER.debug("Radarr grab_release: successfully grabbed '%s'", release.title)
 
     # ------------------------------------------------------------------
     # Helpers

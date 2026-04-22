@@ -196,6 +196,8 @@ class SABnzbdClient:
                 "SABnzbd returned an empty response (likely a refused hostname)"
             )
 
+        _LOGGER.debug("SABnzbd response: %s", text[:2000])
+
         try:
             data: Any = _loads(text)
         except Exception as exc:

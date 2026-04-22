@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 from conductarr.clients.radarr import RadarrClient, RadarrQueueItem
 from conductarr.clients.sabnzbd import Queue, QueueSlot, SABnzbdClient
@@ -198,6 +199,18 @@ class QueueManager:
                         nzo_id,
                         queue_item_id,
                     )
+                    # Fix C: clear upgrade_grabbed so the item re-enters the
+                    # candidate pool after retry_after_days.
+                    queue_item = await self._repo.get_item_by_id(queue_item_id)
+                    if queue_item is not None:
+                        queue_item.metadata.pop("upgrade_grabbed", None)
+                        queue_item.metadata.pop("upgrade_grabbed_at", None)
+                        queue_item.metadata["upgrade_last_searched_at"] = datetime.now(
+                            UTC
+                        ).isoformat()
+                        await self._repo.update_metadata(
+                            queue_item_id, queue_item.metadata
+                        )
                 vq = job_map.get("virtual_queue", "")
                 if vq:
                     completed_virtual_queues.append(vq)
@@ -265,6 +278,11 @@ class QueueManager:
 
         # Reorder only when the queue is out of desired order (idempotent).
         if desired_order != current_order:
+            _LOGGER.debug(
+                "Reorder needed: desired=%s current=%s",
+                desired_order,
+                current_order,
+            )
             live_order = list(current_order)
             for i, target_id in enumerate(desired_order):
                 if live_order[i] == target_id:
@@ -284,11 +302,14 @@ class QueueManager:
                 live_order.pop(j)
                 live_order.insert(i, target_id)
                 _LOGGER.debug(
-                    "Reorder: moved %s above %s (position %d)",
+                    "switch: moving %s above %s (pos %d→%d)",
                     target_id,
                     current_at_i,
+                    j,
                     i,
                 )
+        else:
+            _LOGGER.debug("No reorder needed, queue already in desired order")
 
         # Enforce exactly one active download: slot[0] runs, all others are paused.
         # Only pause slots that are in an interruptible state; skip jobs already in
@@ -301,7 +322,8 @@ class QueueManager:
         if top_slot is not None and top_slot.status == "Paused":
             _LOGGER.info("Resuming top slot %s", top_id)
             try:
-                await self._sabnzbd.resume_job(top_id)
+                result = await self._sabnzbd.resume_job(top_id)
+                _LOGGER.debug("resume_job %s: success=%s", top_id, result)
             except Exception:
                 _LOGGER.exception("Failed to resume top slot %s", top_id)
 
@@ -310,6 +332,12 @@ class QueueManager:
             if slot is not None and slot.status in _PAUSABLE_STATUSES:
                 _LOGGER.info("Pausing non-top slot %s (status=%s)", nzo_id, slot.status)
                 try:
-                    await self._sabnzbd.pause_job(nzo_id)
+                    result = await self._sabnzbd.pause_job(nzo_id)
+                    _LOGGER.debug(
+                        "pause_job %s: success=%s slot_status=%s",
+                        nzo_id,
+                        result,
+                        slot.status,
+                    )
                 except Exception:
                     _LOGGER.exception("Failed to pause non-top slot %s", nzo_id)

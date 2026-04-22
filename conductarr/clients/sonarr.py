@@ -122,6 +122,7 @@ class SonarrClient:
 
     async def get_queue(self) -> list[SonarrQueueItem]:
         """Return all current Sonarr queue items."""
+        _LOGGER.debug("Sonarr get_queue: fetching up to 1000 records")
         try:
             data = await self._get_api().queue.get(page_size=1000)
         except PyarrUnauthorizedError as exc:
@@ -131,7 +132,7 @@ class SonarrClient:
         except Exception as exc:
             raise SonarrError(str(exc)) from exc
 
-        return [
+        records = [
             SonarrQueueItem(
                 download_id=item.get("downloadId", ""),
                 series_id=item.get("seriesId", 0),
@@ -143,6 +144,8 @@ class SonarrClient:
             )
             for item in data.get("records", [])
         ]
+        _LOGGER.debug("Sonarr get_queue: got %d records", len(records))
+        return records
 
     # ------------------------------------------------------------------
     # Series
@@ -150,6 +153,9 @@ class SonarrClient:
 
     async def get_series(self, *, monitored: bool | None = None) -> list[SonarrSeries]:
         """Return all series, optionally filtered by *monitored*."""
+        _LOGGER.debug(
+            "Sonarr get_series: fetching all series (monitored=%s)", monitored
+        )
         try:
             raw = cast(list[dict[str, Any]], await self._get_api().series.get())
         except PyarrUnauthorizedError as exc:
@@ -172,6 +178,7 @@ class SonarrClient:
         ]
         if monitored is not None:
             series = [s for s in series if s.monitored is monitored]
+        _LOGGER.debug("Sonarr get_series: got %d series", len(series))
         return series
 
     # ------------------------------------------------------------------
@@ -186,6 +193,12 @@ class SonarrClient:
         has_file: bool | None = None,
     ) -> list[SonarrEpisode]:
         """Return episodes for a series, optionally filtered."""
+        _LOGGER.debug(
+            "Sonarr get_episodes: series_id=%d (monitored=%s, has_file=%s)",
+            series_id,
+            monitored,
+            has_file,
+        )
         try:
             raw = cast(
                 list[dict[str, Any]],
@@ -203,16 +216,23 @@ class SonarrClient:
             episodes = [e for e in episodes if e.monitored is monitored]
         if has_file is not None:
             episodes = [e for e in episodes if e.has_file is has_file]
+        _LOGGER.debug(
+            "Sonarr get_episodes: series_id=%d got %d episode(s)",
+            series_id,
+            len(episodes),
+        )
         return episodes
 
     async def get_episode(self, episode_id: int) -> SonarrEpisode | None:
         """Look up a single episode by ID.  Returns ``None`` if not found."""
+        _LOGGER.debug("Sonarr get_episode: episode_id=%d", episode_id)
         try:
             raw = cast(
                 dict[str, Any],
                 await self._get_api().episode.get(item_id=episode_id),
             )
         except PyarrResourceNotFound:
+            _LOGGER.debug("Sonarr get_episode: episode_id=%d not found", episode_id)
             return None
         except PyarrUnauthorizedError as exc:
             raise SonarrAuthError(str(exc)) from exc
@@ -221,7 +241,14 @@ class SonarrClient:
         except Exception as exc:
             raise SonarrError(str(exc)) from exc
 
-        return self._to_episode(raw)
+        episode = self._to_episode(raw)
+        _LOGGER.debug(
+            "Sonarr get_episode: found episode S%02dE%02d '%s'",
+            episode.season_number,
+            episode.episode_number,
+            episode.title,
+        )
+        return episode
 
     # ------------------------------------------------------------------
     # Commands
@@ -234,6 +261,7 @@ class SonarrClient:
             This initiates an actual download search in Sonarr.  Only call
             from the :class:`~conductarr.upgrade.scheduler.UpgradeScheduler`.
         """
+        _LOGGER.debug("Sonarr trigger_episode_search: episode_id=%d", episode_id)
         try:
             await self._get_api().command.execute(
                 "EpisodeSearch", episodeIds=[episode_id]
@@ -244,6 +272,10 @@ class SonarrClient:
             raise SonarrConnectionError(str(exc)) from exc
         except Exception as exc:
             raise SonarrError(str(exc)) from exc
+        _LOGGER.debug(
+            "Sonarr trigger_episode_search: command dispatched for episode_id=%d",
+            episode_id,
+        )
         return True
 
     async def trigger_season_search(self, series_id: int, season_number: int) -> bool:
@@ -253,6 +285,11 @@ class SonarrClient:
             This initiates an actual download search in Sonarr.  Only call
             from the :class:`~conductarr.upgrade.scheduler.UpgradeScheduler`.
         """
+        _LOGGER.debug(
+            "Sonarr trigger_season_search: series_id=%d season=%d",
+            series_id,
+            season_number,
+        )
         try:
             await self._get_api().command.execute(
                 "SeasonSearch",
@@ -265,6 +302,11 @@ class SonarrClient:
             raise SonarrConnectionError(str(exc)) from exc
         except Exception as exc:
             raise SonarrError(str(exc)) from exc
+        _LOGGER.debug(
+            "Sonarr trigger_season_search: command dispatched for series_id=%d season=%d",
+            series_id,
+            season_number,
+        )
         return True
 
     # ------------------------------------------------------------------
@@ -273,6 +315,7 @@ class SonarrClient:
 
     async def get_tags(self) -> dict[int, str]:
         """Return a mapping of tag_id → label for all Sonarr tags."""
+        _LOGGER.debug("Sonarr get_tags: fetching all tags")
         try:
             raw = cast(list[dict[str, Any]], await self._get_api().tag.get())
         except PyarrUnauthorizedError as exc:
@@ -281,10 +324,13 @@ class SonarrClient:
             raise SonarrConnectionError(str(exc)) from exc
         except Exception as exc:
             raise SonarrError(str(exc)) from exc
-        return {t["id"]: t["label"] for t in raw}
+        tag_map = {t["id"]: t["label"] for t in raw}
+        _LOGGER.debug("Sonarr get_tags: got %d tag(s)", len(tag_map))
+        return tag_map
 
     async def get_episode_tags(self, episode_id: int) -> list[str]:
         """Return tag labels for the parent series of the given episode."""
+        _LOGGER.debug("Sonarr get_episode_tags: episode_id=%d", episode_id)
         try:
             ep_raw = cast(
                 dict[str, Any],
@@ -321,7 +367,13 @@ class SonarrClient:
         if not tag_ids:
             return []
         tag_map = await self.get_tags()
-        return [tag_map[tid] for tid in tag_ids if tid in tag_map]
+        tags = [tag_map[tid] for tid in tag_ids if tid in tag_map]
+        _LOGGER.debug(
+            "Sonarr get_episode_tags: episode_id=%d got %d tag(s)",
+            episode_id,
+            len(tags),
+        )
+        return tags
 
     # ------------------------------------------------------------------
     # Releases
@@ -329,6 +381,7 @@ class SonarrClient:
 
     async def search_releases(self, episode_id: int) -> list[ReleaseResult]:
         """Search for available releases for *episode_id* via GET /api/v3/release."""
+        _LOGGER.debug("Sonarr search_releases: episode_id=%d", episode_id)
         try:
             raw = await self._get_api().release.get(episode_id=episode_id)
         except PyarrUnauthorizedError as exc:
@@ -338,10 +391,19 @@ class SonarrClient:
         except Exception as exc:
             raise SonarrError(str(exc)) from exc
 
-        return [self._to_release(item) for item in (raw or [])]
+        results = [self._to_release(item) for item in (raw or [])]
+        _LOGGER.debug(
+            "Sonarr search_releases: episode_id=%d got %d release(s)",
+            episode_id,
+            len(results),
+        )
+        return results
 
     async def grab_release(self, release: ReleaseResult) -> None:
         """Force-grab *release* via POST /api/v3/release."""
+        _LOGGER.debug(
+            "Sonarr grab_release: guid=%s title='%s'", release.guid, release.title
+        )
         try:
             await self._get_api().release.add(release.guid, release.indexer_id)
         except PyarrUnauthorizedError as exc:
@@ -350,6 +412,7 @@ class SonarrClient:
             raise SonarrConnectionError(str(exc)) from exc
         except Exception as exc:
             raise SonarrError(str(exc)) from exc
+        _LOGGER.debug("Sonarr grab_release: successfully grabbed '%s'", release.title)
 
     # ------------------------------------------------------------------
     # Helpers
