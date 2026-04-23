@@ -403,17 +403,17 @@ class SonarrClient:
             raise SonarrError(str(exc)) from exc
         _LOGGER.debug("Sonarr grab_release: successfully grabbed '%s'", release.title)
 
-    async def get_blocklist_guids(self) -> set[str]:
-        """Return identifiers for all blocklisted releases.
+    async def get_blocklist_source_titles(self) -> set[str]:
+        """Return the ``sourceTitle`` of every blocklisted release.
 
         Fetches ``GET /api/v3/blocklist?pageSize=1000``, paginating until all
-        records are consumed.  Each record contributes its ``guid`` field (if
-        present and non-empty) or falls back to ``sourceTitle``.  The returned
-        set can be cross-referenced against :attr:`ReleaseResult.guid`.
+        records are consumed.  Each record contributes its ``sourceTitle``
+        (the NZB/torrent filename), which corresponds to
+        :attr:`~conductarr.clients.release.ReleaseResult.title`.
         """
         url = f"{self._url.rstrip('/')}/api/v3/blocklist"
         headers = {"X-Api-Key": self._api_key}
-        guids: set[str] = set()
+        titles: set[str] = set()
         page = 1
         while True:
             try:
@@ -434,15 +434,15 @@ class SonarrClient:
 
             records: list[dict[str, Any]] = data.get("records", [])
             for record in records:
-                identifier = record.get("guid", "") or record.get("sourceTitle", "")
-                if identifier:
-                    guids.add(identifier)
+                title = record.get("sourceTitle", "")
+                if title:
+                    titles.add(title)
             if not records or len(records) < 1000:
                 break
             page += 1
 
-        _LOGGER.debug("Sonarr blocklist: fetched %d identifier(s)", len(guids))
-        return guids
+        _LOGGER.debug("Sonarr blocklist: fetched %d source title(s)", len(titles))
+        return titles
 
     async def get_episode_file(self, episode_file_id: int) -> dict[str, Any] | None:
         """Return the episode-file record for *episode_file_id*, or None.

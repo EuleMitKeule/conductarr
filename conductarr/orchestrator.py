@@ -962,12 +962,15 @@ class Orchestrator:
                 self._candidate_cursor[(queue_name, source)] = candidate.source_id
                 return False
 
+            # Filter out releases that the indexer/Arr has marked as not downloadable
+            matching = [r for r in matching if r.download_allowed]
+
             # Filter out blocklisted releases (per-cycle cached; never blocks upgrade loop)
-            blocklist_ids = await self._get_blocklist(source)
-            if blocklist_ids:
+            blocklist_titles = await self._get_blocklist(source)
+            if blocklist_titles:
                 clean: list[ReleaseResult] = []
                 for r in matching:
-                    if r.guid in blocklist_ids:
+                    if r.title in blocklist_titles:
                         _LOGGER.info(
                             "Skipping blocklisted release for %s/%s: '%s'",
                             source,
@@ -1066,21 +1069,23 @@ class Orchestrator:
             return self._blocklist_cache[source]
         try:
             if source == "radarr":
-                guids = await self._radarr.get_blocklist_guids()
+                titles = await self._radarr.get_blocklist_source_titles()
             elif source == "sonarr":
-                guids = await self._sonarr.get_blocklist_guids()
+                titles = await self._sonarr.get_blocklist_source_titles()
             else:
-                guids = set()
+                titles = set()
         except Exception:
             _LOGGER.warning(
                 "Failed to fetch blocklist for '%s' — proceeding without filter",
                 source,
                 exc_info=True,
             )
-            guids = set()
-        _LOGGER.debug("Blocklist cache for '%s': %d identifier(s)", source, len(guids))
-        self._blocklist_cache[source] = guids
-        return guids
+            titles = set()
+        _LOGGER.debug(
+            "Blocklist cache for '%s': %d source title(s)", source, len(titles)
+        )
+        self._blocklist_cache[source] = titles
+        return titles
 
     async def _check_satisfies_conditions(
         self,

@@ -110,10 +110,10 @@ async def test_blocklisted_release_is_skipped_clean_release_grabbed(
 
     Setup:
     - Movie has_file=True, no HDR → eligible for upgrade
-    - Two HDR releases available: one blocklisted (guid-bad), one clean (guid-good)
-    - Blocklist contains guid-bad
+    - Two HDR releases available: one blocklisted by sourceTitle, one clean
+    - Blocklist contains the title of the higher-scoring release
 
-    Expected: guid-good is grabbed; guid-bad is never grabbed.
+    Expected: the lower-scoring release (not blocklisted) is grabbed.
     """
     movie = await radarr_control.add_movie(
         title="Blade Runner 2049",
@@ -128,21 +128,21 @@ async def test_blocklisted_release_is_skipped_clean_release_grabbed(
     # Seed two HDR releases
     await radarr_control.add_release(
         tmdb_id=335984,
-        guid="guid-bad",
+        guid="guid-720p",
         title="Blade.Runner.2049.BluRay.HDR.720p",
         custom_formats=["HDR"],
         custom_format_score=100,
     )
     await radarr_control.add_release(
         tmdb_id=335984,
-        guid="guid-good",
+        guid="guid-1080p",
         title="Blade.Runner.2049.BluRay.HDR.1080p",
         custom_formats=["HDR"],
         custom_format_score=200,  # better score → would normally be preferred
     )
 
-    # Blocklist the better release
-    await radarr_control.add_to_blocklist("guid-good")
+    # Blocklist the higher-scoring release by its sourceTitle
+    await radarr_control.add_to_blocklist("Blade.Runner.2049.BluRay.HDR.1080p")
 
     # Seed upgrade candidate in DB (simulates prior queue assignment)
     await engine_blocklist.repo.upsert_item(
@@ -156,10 +156,10 @@ async def test_blocklisted_release_is_skipped_clean_release_grabbed(
 
     await engine_blocklist.poll_once()
 
-    # Verify guid-bad was grabbed (the only remaining match)
+    # Verify the 720p release (guid-720p) was grabbed — the 1080p was blocklisted
     mock_state = await radarr_control.get_state()
-    assert mock_state["grabbed"] == ["guid-bad"], (
-        f"Expected ['guid-bad'] to be grabbed, got {mock_state['grabbed']}"
+    assert mock_state["grabbed"] == ["guid-720p"], (
+        f"Expected ['guid-720p'] to be grabbed, got {mock_state['grabbed']}"
     )
 
     # Verify DB marks the candidate as grabbed
@@ -188,12 +188,12 @@ async def test_all_releases_blocklisted_no_grab_occurs(
 
     await radarr_control.add_release(
         tmdb_id=157336,
-        guid="guid-blocklisted-only",
+        guid="guid-interstellar-hdr",
         title="Interstellar.BluRay.HDR.1080p",
         custom_formats=["HDR"],
         custom_format_score=100,
     )
-    await radarr_control.add_to_blocklist("guid-blocklisted-only")
+    await radarr_control.add_to_blocklist("Interstellar.BluRay.HDR.1080p")
 
     await engine_blocklist.repo.upsert_item(
         QueueItem(
