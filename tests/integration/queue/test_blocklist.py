@@ -174,7 +174,9 @@ async def test_all_releases_blocklisted_no_grab_occurs(
 ) -> None:
     """When all matching releases are blocklisted, no grab occurs.
 
-    The candidate cursor is still advanced so the next cycle moves on.
+    The candidate cursor must NOT be advanced and upgrade_no_match_at must NOT
+    be written — blocklist filtering is transient and the candidate must be
+    retried every cycle.
     """
     movie = await radarr_control.add_movie(
         title="Interstellar",
@@ -215,6 +217,8 @@ async def test_all_releases_blocklisted_no_grab_occurs(
     db_item = await engine_blocklist.repo.get_item("radarr", str(movie_id))
     assert db_item is not None
     assert not db_item.metadata.get("upgrade_grabbed")
+    # Transient filter: no_match_at must NOT be written either
+    assert "upgrade_no_match_at" not in db_item.metadata
 
 
 async def test_empty_blocklist_does_not_filter_releases(

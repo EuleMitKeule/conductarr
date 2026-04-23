@@ -963,28 +963,39 @@ class Orchestrator:
                 return False
 
             # Filter out releases that the indexer/Arr has marked as not downloadable
-            matching = [r for r in matching if r.download_allowed]
+            # (transient — never set no_match_at or advance cursor for this alone)
+            available = [r for r in matching if r.download_allowed]
 
             # Filter out blocklisted releases (per-cycle cached; never blocks upgrade loop)
+            # (transient — the blocklist can change, so do NOT set no_match_at)
             blocklist_titles = await self._get_blocklist(source)
-            if blocklist_titles:
-                clean: list[ReleaseResult] = []
-                for r in matching:
-                    if r.title in blocklist_titles:
-                        _LOGGER.info(
-                            "Skipping blocklisted release for %s/%s: '%s'",
-                            source,
-                            candidate.source_id,
-                            r.title,
-                        )
-                    else:
-                        clean.append(r)
-                matching = clean
+            for r in available:
+                if r.title in blocklist_titles:
+                    _LOGGER.info(
+                        "Skipping blocklisted release for %s/%s: '%s'",
+                        source,
+                        candidate.source_id,
+                        r.title,
+                    )
+            available = [r for r in available if r.title not in blocklist_titles]
+
+            # If accept_conditions matched releases but ALL were filtered by transient
+            # constraints (download_allowed=False or blocklisted), skip this candidate
+            # silently — do NOT set no_match_at and do NOT advance the cursor so it
+            # is retried every cycle until the constraints clear.
+            if matching and not available:
+                _LOGGER.debug(
+                    "All matching releases for %s/%s were filtered by transient "
+                    "constraints (blocklist/not downloadable) — will retry next cycle",
+                    source,
+                    candidate.source_id,
+                )
+                continue
 
             candidate.metadata["upgrade_last_searched_at"] = now_str
 
-            if matching:
-                best = max(matching, key=lambda r: r.custom_format_score)
+            if available:
+                best = max(available, key=lambda r: r.custom_format_score)
 
                 # ------------------------------------------------------------------
                 # Phase 2: Send the release to SABnzbd (via the Arr grab API).
@@ -1027,6 +1038,8 @@ class Orchestrator:
                 )
                 return True
             else:
+                # No releases from the indexer, or releases exist but none satisfy
+                # accept_conditions — mark as no-match and advance cursor.
                 candidate.metadata["upgrade_no_match_at"] = now_str
                 await self._repo.update_metadata(candidate.id, candidate.metadata)
                 self._candidate_cursor[(queue_name, source)] = candidate.source_id
