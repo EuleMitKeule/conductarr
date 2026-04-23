@@ -297,6 +297,47 @@ class RadarrClient:
             raise RadarrError(str(exc)) from exc
         _LOGGER.debug("Radarr grab_release: successfully grabbed '%s'", release.title)
 
+    async def get_blocklist_guids(self) -> set[str]:
+        """Return identifiers for all blocklisted releases.
+
+        Fetches ``GET /api/v3/blocklist?pageSize=1000``, paginating until all
+        records are consumed.  Each record contributes its ``guid`` field (if
+        present and non-empty) or falls back to ``sourceTitle``.  The returned
+        set can be cross-referenced against :attr:`ReleaseResult.guid`.
+        """
+        url = f"{self._url.rstrip('/')}/api/v3/blocklist"
+        headers = {"X-Api-Key": self._api_key}
+        guids: set[str] = set()
+        page = 1
+        while True:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        url,
+                        headers=headers,
+                        params={"pageSize": "1000", "page": str(page)},
+                    ) as resp:
+                        resp.raise_for_status()
+                        data: dict[str, Any] = await resp.json()
+            except aiohttp.ServerTimeoutError as exc:
+                raise RadarrConnectionError(str(exc)) from exc
+            except aiohttp.ClientError as exc:
+                raise RadarrConnectionError(str(exc)) from exc
+            except Exception as exc:
+                raise RadarrError(str(exc)) from exc
+
+            records: list[dict[str, Any]] = data.get("records", [])
+            for record in records:
+                identifier = record.get("guid", "") or record.get("sourceTitle", "")
+                if identifier:
+                    guids.add(identifier)
+            if not records or len(records) < 1000:
+                break
+            page += 1
+
+        _LOGGER.debug("Radarr blocklist: fetched %d identifier(s)", len(guids))
+        return guids
+
     async def get_movie_file(self, movie_id: int) -> dict[str, Any] | None:
         """Return the first movie-file record for *movie_id*, or None.
 

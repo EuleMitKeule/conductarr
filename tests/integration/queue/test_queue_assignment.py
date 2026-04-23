@@ -341,6 +341,7 @@ async def test_external_grab_uses_fresh_context_not_db_queue(
 
     The DB virtual_queue record is not overwritten so upgrade cursor tracking
     is unaffected.  The NZO cache entry receives the freshly resolved queue.
+    External grabs are identified by the absence of upgrade_grabbed in metadata.
     """
     # Seed: create movie with no HDR → ends up in hdr_upgrade queue in DB
     movie = await radarr_control.add_movie(
@@ -354,6 +355,7 @@ async def test_external_grab_uses_fresh_context_not_db_queue(
     movie_id: int = movie["id"]
 
     # Simulate that conductarr previously seeded this movie → DB has hdr_upgrade
+    # but no upgrade_grabbed flag (item was seeded, not yet grabbed)
     from conductarr.queue.models import QueueItem
 
     item = await engine_external.repo.upsert_item(
@@ -362,6 +364,7 @@ async def test_external_grab_uses_fresh_context_not_db_queue(
             source_id=str(movie_id),
             virtual_queue="hdr_upgrade",
             tags=["upgrade"],
+            # metadata has no upgrade_grabbed → external grab path
         )
     )
     assert item.virtual_queue == "hdr_upgrade"
@@ -382,8 +385,7 @@ async def test_external_grab_uses_fresh_context_not_db_queue(
 
     await engine_external.poll_once()
 
-    # Job map is created but uses the item's persisted virtual_queue (hdr_upgrade)
-    # as the stored queue — the DB record is NOT changed
+    # DB virtual_queue must remain unchanged
     db_item = await engine_external.repo.get_item("radarr", str(movie_id))
     assert db_item is not None
     assert db_item.virtual_queue == "hdr_upgrade"  # DB unchanged
@@ -393,3 +395,61 @@ async def test_external_grab_uses_fresh_context_not_db_queue(
     cache_entry = engine_external._orchestrator._nzo_cache.get(nzo_id)
     assert cache_entry is not None
     assert cache_entry.virtual_queue == "fallback"
+
+
+async def test_conductarr_grab_uses_persisted_virtual_queue(
+    sabnzbd_control: SABnzbdControlClient,
+    radarr_control: RadarrControlClient,
+    engine_external: ConductarrEngine,
+) -> None:
+    """A conductarr-initiated grab is detected via upgrade_grabbed metadata.
+
+    When upgrade_grabbed=True is set (by the grab loop before the nzo_id is
+    known), _resolve_one must use the persisted virtual_queue for the job-map
+    entry rather than re-deriving it.  This prevents runaway grabbing caused
+    by sab_active counting going to zero because all job-map entries have the
+    wrong queue name.
+    """
+    movie = await radarr_control.add_movie(
+        title="Mad Max: Fury Road",
+        tmdb_id=76341,
+        has_file=True,
+        custom_format_score=5,
+        custom_formats=[],  # HDR not satisfied
+        tags=["upgrade"],
+    )
+    movie_id: int = movie["id"]
+
+    from conductarr.queue.models import QueueItem
+
+    # Simulate state after conductarr's grab loop ran: item is in DB with
+    # virtual_queue=hdr_upgrade and upgrade_grabbed=True in metadata.
+    item = await engine_external.repo.upsert_item(
+        QueueItem(
+            source="radarr",
+            source_id=str(movie_id),
+            virtual_queue="hdr_upgrade",
+            tags=["upgrade"],
+            metadata={"upgrade_grabbed": True},
+        )
+    )
+    assert item.virtual_queue == "hdr_upgrade"
+
+    # The nzo_id now appears in SABnzbd (the download conductarr grabbed)
+    nzo_id = await sabnzbd_control.start_job(
+        filename="Mad.Max.Fury.Road.2015.BluRay.HDR.1080p.nzb",
+        cat="radarr",
+    )
+    await radarr_control.release_movie(tmdb_id=76341, nzo_id=nzo_id)
+
+    await engine_external.poll_once()
+
+    # Job map must record hdr_upgrade, not a freshly-derived queue
+    job_map = await engine_external.repo.get_job_map(nzo_id)
+    assert job_map is not None
+    assert job_map["virtual_queue"] == "hdr_upgrade"
+
+    # NZO cache entry must also reflect hdr_upgrade for correct slot counting
+    cache_entry = engine_external._orchestrator._nzo_cache.get(nzo_id)
+    assert cache_entry is not None
+    assert cache_entry.virtual_queue == "hdr_upgrade"

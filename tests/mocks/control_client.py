@@ -122,6 +122,32 @@ class RadarrControlClient(_BaseControlClient):
     async def cancel_movie(self, tmdb_id: int) -> None:
         await self._post("/control/movie/cancelled", json={"tmdb_id": tmdb_id})
 
+    async def add_release(
+        self,
+        tmdb_id: int,
+        guid: str,
+        title: str,
+        indexer_id: int = 1,
+        custom_formats: list[str] | None = None,
+        custom_format_score: int = 0,
+        download_allowed: bool = True,
+    ) -> dict[str, Any]:
+        return await self._post(
+            "/control/release/add",
+            json={
+                "tmdb_id": tmdb_id,
+                "guid": guid,
+                "title": title,
+                "indexer_id": indexer_id,
+                "custom_formats": custom_formats or [],
+                "custom_format_score": custom_format_score,
+                "download_allowed": download_allowed,
+            },
+        )
+
+    async def add_to_blocklist(self, identifier: str) -> None:
+        await self._post("/control/blocklist/add", json={"identifier": identifier})
+
     async def get_state(self) -> dict[str, Any]:
         return await self._get("/control/state")
 
@@ -175,6 +201,32 @@ class SonarrControlClient(_BaseControlClient):
 
     async def cancel_episode(self, episode_id: int) -> None:
         await self._post("/control/episode/cancelled", json={"episode_id": episode_id})
+
+    async def add_release(
+        self,
+        episode_id: int,
+        guid: str,
+        title: str,
+        indexer_id: int = 1,
+        custom_formats: list[str] | None = None,
+        custom_format_score: int = 0,
+        download_allowed: bool = True,
+    ) -> dict[str, Any]:
+        return await self._post(
+            "/control/release/add",
+            json={
+                "episode_id": episode_id,
+                "guid": guid,
+                "title": title,
+                "indexer_id": indexer_id,
+                "custom_formats": custom_formats or [],
+                "custom_format_score": custom_format_score,
+                "download_allowed": download_allowed,
+            },
+        )
+
+    async def add_to_blocklist(self, identifier: str) -> None:
+        await self._post("/control/blocklist/add", json={"identifier": identifier})
 
     async def get_state(self) -> dict[str, Any]:
         return await self._get("/control/state")

@@ -20,6 +20,16 @@ class MockMovie:
 
 
 @dataclass
+class MockRelease:
+    guid: str
+    title: str
+    indexer_id: int = 1
+    custom_formats: list[str] = field(default_factory=list)
+    custom_format_score: int = 0
+    download_allowed: bool = True
+
+
+@dataclass
 class MockTag:
     id: int
     label: str
@@ -41,17 +51,28 @@ class RadarrState:
         self.movies: dict[int, MockMovie] = {}
         self.tags: dict[int, MockTag] = {}
         self.queue: dict[int, MockQueueItem] = {}
+        # movie_id → list of available releases (for /api/v3/release?movieId=X)
+        self.releases: dict[int, list[MockRelease]] = {}
+        # Identifiers (guid or sourceTitle) that appear in the blocklist
+        self.blocklist: list[str] = []
+        # GUIDs that were grabbed via POST /api/v3/release (for test assertions)
+        self.grabbed: list[str] = []
         self._movie_counter: int = 0
         self._tag_counter: int = 0
         self._queue_counter: int = 0
+        self._blocklist_counter: int = 0
 
     def reset(self) -> None:
         self.movies.clear()
         self.tags.clear()
         self.queue.clear()
+        self.releases.clear()
+        self.blocklist.clear()
+        self.grabbed.clear()
         self._movie_counter = 0
         self._tag_counter = 0
         self._queue_counter = 0
+        self._blocklist_counter = 0
 
     # -- tag helpers --
 
@@ -176,4 +197,44 @@ class RadarrState:
             "movies": {mid: self.movie_to_dict(m) for mid, m in self.movies.items()},
             "tags": {tid: self.tag_to_dict(t) for tid, t in self.tags.items()},
             "queue": {qid: self.queue_item_to_dict(q) for qid, q in self.queue.items()},
+            "grabbed": list(self.grabbed),
         }
+
+    # -- release operations --
+
+    def add_release(self, movie_id: int, release: MockRelease) -> None:
+        self.releases.setdefault(movie_id, []).append(release)
+
+    def release_to_dict(self, release: MockRelease) -> dict[str, Any]:
+        return {
+            "guid": release.guid,
+            "title": release.title,
+            "indexerId": release.indexer_id,
+            "customFormats": [
+                {"id": i + 1, "name": name}
+                for i, name in enumerate(release.custom_formats)
+            ],
+            "customFormatScore": release.custom_format_score,
+            "quality": {"quality": {"name": "Bluray-1080p"}},
+            "size": 4_000_000_000,
+            "downloadAllowed": release.download_allowed,
+        }
+
+    # -- blocklist operations --
+
+    def add_to_blocklist(self, identifier: str) -> None:
+        """Add *identifier* (a guid or sourceTitle) to the blocklist."""
+        self._blocklist_counter += 1
+        self.blocklist.append(identifier)
+
+    def blocklist_to_page(self, page: int, page_size: int) -> dict[str, Any]:
+        start = (page - 1) * page_size
+        records = [
+            {
+                "id": i + 1,
+                "guid": identifier,
+                "sourceTitle": identifier,
+            }
+            for i, identifier in enumerate(self.blocklist)
+        ][start : start + page_size]
+        return {"totalRecords": len(self.blocklist), "records": records}

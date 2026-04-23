@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from .state import RadarrState
+from .state import MockRelease, RadarrState
 
 API_KEY = "radarr-test-key"
 
@@ -81,6 +81,32 @@ async def post_command(body: dict, _: None = Depends(_require_api_key)) -> dict:
     return {"id": 1, "name": name, "status": "started"}
 
 
+@app.get("/api/v3/release")
+async def get_releases(
+    movieId: int = Query(...),  # noqa: N803
+    _: None = Depends(_require_api_key),
+) -> list[dict]:
+    releases = state.releases.get(movieId, [])
+    return [state.release_to_dict(r) for r in releases]
+
+
+@app.post("/api/v3/release")
+async def grab_release(body: dict, _: None = Depends(_require_api_key)) -> dict:
+    guid = body.get("guid", "")
+    if guid:
+        state.grabbed.append(guid)
+    return {"id": 1, "guid": guid, "status": "grabbed"}
+
+
+@app.get("/api/v3/blocklist")
+async def get_blocklist(
+    pageSize: int = Query(default=10),  # noqa: N803
+    page: int = Query(default=1),
+    _: None = Depends(_require_api_key),
+) -> dict:
+    return state.blocklist_to_page(page, pageSize)
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models for control endpoints
 # ---------------------------------------------------------------------------
@@ -94,6 +120,20 @@ class AddMovieRequest(BaseModel):
     custom_format_score: int = 0
     tags: list[str] = []
     custom_formats: list[str] = []
+
+
+class AddReleaseRequest(BaseModel):
+    tmdb_id: int
+    guid: str
+    title: str
+    indexer_id: int = 1
+    custom_formats: list[str] = []
+    custom_format_score: int = 0
+    download_allowed: bool = True
+
+
+class BlocklistAddRequest(BaseModel):
+    identifier: str  # guid or sourceTitle to blocklist
 
 
 class ReleaseMovieRequest(BaseModel):
@@ -171,3 +211,26 @@ async def control_movie_cancelled(body: CancelMovieRequest) -> dict:
 @app.get("/control/state")
 async def control_state() -> dict:
     return state.to_dict()
+
+
+@app.post("/control/release/add")
+async def control_release_add(body: AddReleaseRequest) -> dict:
+    movie = state.find_movie_by_tmdb(body.tmdb_id)
+    if movie is None:
+        raise HTTPException(status_code=404, detail="Movie not found")
+    release = MockRelease(
+        guid=body.guid,
+        title=body.title,
+        indexer_id=body.indexer_id,
+        custom_formats=body.custom_formats,
+        custom_format_score=body.custom_format_score,
+        download_allowed=body.download_allowed,
+    )
+    state.add_release(movie.id, release)
+    return state.release_to_dict(release)
+
+
+@app.post("/control/blocklist/add")
+async def control_blocklist_add(body: BlocklistAddRequest) -> dict:
+    state.add_to_blocklist(body.identifier)
+    return {"ok": True, "identifier": body.identifier}

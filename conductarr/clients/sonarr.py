@@ -403,6 +403,47 @@ class SonarrClient:
             raise SonarrError(str(exc)) from exc
         _LOGGER.debug("Sonarr grab_release: successfully grabbed '%s'", release.title)
 
+    async def get_blocklist_guids(self) -> set[str]:
+        """Return identifiers for all blocklisted releases.
+
+        Fetches ``GET /api/v3/blocklist?pageSize=1000``, paginating until all
+        records are consumed.  Each record contributes its ``guid`` field (if
+        present and non-empty) or falls back to ``sourceTitle``.  The returned
+        set can be cross-referenced against :attr:`ReleaseResult.guid`.
+        """
+        url = f"{self._url.rstrip('/')}/api/v3/blocklist"
+        headers = {"X-Api-Key": self._api_key}
+        guids: set[str] = set()
+        page = 1
+        while True:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        url,
+                        headers=headers,
+                        params={"pageSize": "1000", "page": str(page)},
+                    ) as resp:
+                        resp.raise_for_status()
+                        data: dict[str, Any] = await resp.json()
+            except aiohttp.ServerTimeoutError as exc:
+                raise SonarrConnectionError(str(exc)) from exc
+            except aiohttp.ClientError as exc:
+                raise SonarrConnectionError(str(exc)) from exc
+            except Exception as exc:
+                raise SonarrError(str(exc)) from exc
+
+            records: list[dict[str, Any]] = data.get("records", [])
+            for record in records:
+                identifier = record.get("guid", "") or record.get("sourceTitle", "")
+                if identifier:
+                    guids.add(identifier)
+            if not records or len(records) < 1000:
+                break
+            page += 1
+
+        _LOGGER.debug("Sonarr blocklist: fetched %d identifier(s)", len(guids))
+        return guids
+
     async def get_episode_file(self, episode_file_id: int) -> dict[str, Any] | None:
         """Return the episode-file record for *episode_file_id*, or None.
 

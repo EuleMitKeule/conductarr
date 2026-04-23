@@ -190,6 +190,11 @@ class Orchestrator:
         # per (queue_name, source).  Prevents hammering indexers within search_interval.
         self._last_search_at: dict[tuple[str, str], datetime] = {}
 
+        # Per-cycle blocklist cache: source → set of blocked identifiers.
+        # Cleared at the start of each _fill_upgrade_slots call so each poll
+        # cycle fetches a fresh list at most once per source.
+        self._blocklist_cache: dict[str, set[str]] = {}
+
         # Change-detection to avoid log spam on idle cycles
         self._prev_sab_slots: int | None = None
         self._prev_sab_paused: bool | None = None
@@ -362,31 +367,36 @@ class Orchestrator:
             if item is None:
                 item = QueueItem(source="radarr", source_id=source_id, tags=tags)
                 item = await self._assign_queue(item, context)
+                resolved_queue: str | None = item.virtual_queue
             else:
-                existing_job_map = await self._repo.get_job_map(nzo_id)
-                if existing_job_map is None:
+                is_conductarr_grab = item.metadata.get("upgrade_grabbed") is True
+                if is_conductarr_grab:
+                    # Conductarr-initiated: honour the persisted virtual_queue
+                    resolved_queue = item.virtual_queue
+                else:
                     # External grab: re-derive queue for ordering; do NOT persist
                     item.tags = tags
                     resolved_queue = self._assign_queue_for_ordering(item, context)
-                    if item.id is not None:
-                        await self._repo.upsert_job_map(
-                            nzo_id, item.id, item.virtual_queue or ""
-                        )
-                    _LOGGER.info(
-                        "Resolved nzo_id=%s → Radarr '%s' (movie_id=%s)"
-                        " → queue=%s (external grab)",
-                        nzo_id,
-                        radarr_item.title,
-                        source_id,
-                        resolved_queue,
+
+                if item.id is not None and await self._repo.get_job_map(nzo_id) is None:
+                    await self._repo.upsert_job_map(
+                        nzo_id, item.id, resolved_queue or ""
                     )
-                    return _NzoCacheEntry(
-                        source="radarr",
-                        source_id=source_id,
-                        virtual_queue=resolved_queue,
-                        tags=tags,
-                    )
-                # Conductarr grab: job map already exists — nothing to update
+
+                _LOGGER.info(
+                    "Resolved nzo_id=%s → Radarr '%s' (movie_id=%s) → queue=%s%s",
+                    nzo_id,
+                    radarr_item.title,
+                    source_id,
+                    resolved_queue,
+                    "" if is_conductarr_grab else " (external grab)",
+                )
+                return _NzoCacheEntry(
+                    source="radarr",
+                    source_id=source_id,
+                    virtual_queue=resolved_queue,
+                    tags=tags,
+                )
 
             if item.id is not None and await self._repo.get_job_map(nzo_id) is None:
                 await self._repo.upsert_job_map(
@@ -423,31 +433,36 @@ class Orchestrator:
             if item is None:
                 item = QueueItem(source="sonarr", source_id=source_id, tags=tags)
                 item = await self._assign_queue(item, context)
+                resolved_queue = item.virtual_queue
             else:
-                existing_job_map = await self._repo.get_job_map(nzo_id)
-                if existing_job_map is None:
+                is_conductarr_grab = item.metadata.get("upgrade_grabbed") is True
+                if is_conductarr_grab:
+                    # Conductarr-initiated: honour the persisted virtual_queue
+                    resolved_queue = item.virtual_queue
+                else:
                     # External grab: re-derive queue for ordering; do NOT persist
                     item.tags = tags
                     resolved_queue = self._assign_queue_for_ordering(item, context)
-                    if item.id is not None:
-                        await self._repo.upsert_job_map(
-                            nzo_id, item.id, item.virtual_queue or ""
-                        )
-                    _LOGGER.info(
-                        "Resolved nzo_id=%s → Sonarr '%s' (episode_id=%s)"
-                        " → queue=%s (external grab)",
-                        nzo_id,
-                        sonarr_item.title,
-                        source_id,
-                        resolved_queue,
+
+                if item.id is not None and await self._repo.get_job_map(nzo_id) is None:
+                    await self._repo.upsert_job_map(
+                        nzo_id, item.id, resolved_queue or ""
                     )
-                    return _NzoCacheEntry(
-                        source="sonarr",
-                        source_id=source_id,
-                        virtual_queue=resolved_queue,
-                        tags=tags,
-                    )
-                # Conductarr grab: job map already exists — nothing to update
+
+                _LOGGER.info(
+                    "Resolved nzo_id=%s → Sonarr '%s' (episode_id=%s) → queue=%s%s",
+                    nzo_id,
+                    sonarr_item.title,
+                    source_id,
+                    resolved_queue,
+                    "" if is_conductarr_grab else " (external grab)",
+                )
+                return _NzoCacheEntry(
+                    source="sonarr",
+                    source_id=source_id,
+                    virtual_queue=resolved_queue,
+                    tags=tags,
+                )
 
             if item.id is not None and await self._repo.get_job_map(nzo_id) is None:
                 await self._repo.upsert_job_map(
@@ -776,6 +791,7 @@ class Orchestrator:
 
     async def _fill_upgrade_slots(self, nzo_to_vq: dict[str, str]) -> None:
         """Attempt to fill any open slots in every configured upgrade queue."""
+        self._blocklist_cache.clear()  # reset per-cycle; populated lazily in _get_blocklist
         for qc in self._upgrade_queue_configs:
             if qc.upgrade is None or not qc.upgrade.enabled:
                 continue
@@ -946,6 +962,22 @@ class Orchestrator:
                 self._candidate_cursor[(queue_name, source)] = candidate.source_id
                 return False
 
+            # Filter out blocklisted releases (per-cycle cached; never blocks upgrade loop)
+            blocklist_ids = await self._get_blocklist(source)
+            if blocklist_ids:
+                clean: list[ReleaseResult] = []
+                for r in matching:
+                    if r.guid in blocklist_ids:
+                        _LOGGER.info(
+                            "Skipping blocklisted release for %s/%s: '%s'",
+                            source,
+                            candidate.source_id,
+                            r.title,
+                        )
+                    else:
+                        clean.append(r)
+                matching = clean
+
             candidate.metadata["upgrade_last_searched_at"] = now_str
 
             if matching:
@@ -1021,6 +1053,34 @@ class Orchestrator:
                 return True
 
         return False
+
+    async def _get_blocklist(self, source: str) -> set[str]:
+        """Return cached blocklist identifiers for *source*.
+
+        Results are populated once per cycle and cached in ``_blocklist_cache``
+        which is cleared at the start of each ``_fill_upgrade_slots`` call.
+        Any fetch failure returns an empty set with a warning — blocklist
+        errors must never block the upgrade loop.
+        """
+        if source in self._blocklist_cache:
+            return self._blocklist_cache[source]
+        try:
+            if source == "radarr":
+                guids = await self._radarr.get_blocklist_guids()
+            elif source == "sonarr":
+                guids = await self._sonarr.get_blocklist_guids()
+            else:
+                guids = set()
+        except Exception:
+            _LOGGER.warning(
+                "Failed to fetch blocklist for '%s' — proceeding without filter",
+                source,
+                exc_info=True,
+            )
+            guids = set()
+        _LOGGER.debug("Blocklist cache for '%s': %d identifier(s)", source, len(guids))
+        self._blocklist_cache[source] = guids
+        return guids
 
     async def _check_satisfies_conditions(
         self,
