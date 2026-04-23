@@ -266,8 +266,8 @@ class Orchestrator:
         # Step 2: Resolve each nzo_id to its virtual queue (lazy Arr lookup)
         nzo_to_entry = await self._resolve_all(slots)
 
-        # Step 3: Handle completed jobs (in DB/cache but no longer in SABnzbd)
-        await self._handle_completions(sab_queue)
+        # Step 3: Handle completed jobs (confirmed via SABnzbd history API)
+        await self._handle_completions()
 
         # Build nzo_id → virtual_queue for ordering (only mapped entries)
         nzo_to_vq: dict[str, str] = {
@@ -462,14 +462,38 @@ class Orchestrator:
     # Step 3: Handle completed jobs
     # ------------------------------------------------------------------
 
-    async def _handle_completions(self, sab_queue: Queue) -> None:
-        """Mark jobs no longer in SABnzbd as completed; evict them from cache."""
-        current_nzo_ids = {s.nzo_id for s in sab_queue.slots}
-        all_maps = await self._repo.get_all_job_maps()
+    async def _handle_completions(self) -> None:
+        """Mark jobs as completed once they appear in SABnzbd history.
 
+        Uses the SABnzbd history API as the authoritative completion signal
+        rather than mere absence from the active queue.  This prevents false
+        completions during post-processing transitions (Extracting / Moving)
+        where a job temporarily disappears from the queue but has not actually
+        finished yet.
+
+        If the history call fails, completion detection is skipped entirely for
+        this cycle — it is always safer to leave a job tracked than to
+        prematurely mark it done.
+        """
+        try:
+            history_slots = await self._sab.get_history()
+        except Exception:
+            _LOGGER.warning(
+                "Failed to read SABnzbd history; skipping completion detection this cycle"
+            )
+            return
+
+        completed_nzo_ids = {
+            slot["nzo_id"] for slot in history_slots if slot.get("nzo_id")
+        }
+
+        all_maps = await self._repo.get_all_job_maps()
         for job_map in all_maps:
             nzo_id = job_map["nzo_id"]
-            if nzo_id in current_nzo_ids:
+            if nzo_id not in completed_nzo_ids:
+                # Not in history yet — could be in-queue, post-processing, or
+                # the job finished but history hasn't been fetched yet.
+                # Do nothing; wait for the next cycle.
                 continue
 
             queue_item_id = job_map["queue_item_id"]
@@ -486,7 +510,9 @@ class Orchestrator:
                     ).isoformat()
                     await self._repo.update_metadata(queue_item_id, queue_item.metadata)
                 _LOGGER.info(
-                    "Job %s completed → queue item %d reset", nzo_id, queue_item_id
+                    "Job %s completed (confirmed in history) → queue item %d reset",
+                    nzo_id,
+                    queue_item_id,
                 )
 
             await self._repo.delete_job_map(nzo_id)
@@ -723,8 +749,14 @@ class Orchestrator:
                 self._candidate_cursor[(queue_name, source)] = candidate.source_id
                 continue
 
-            # Search releases for this candidate
-            self._last_search_at[(queue_name, source)] = datetime.now(UTC)
+            # ------------------------------------------------------------------
+            # Phase 1: Search the indexer for matching releases.
+            #
+            # _last_search_at is NOT set here yet — it is only set once a grab
+            # is confirmed successful.  This ensures that a transient SABnzbd
+            # failure during Phase 2 never blocks the next cycle from retrying
+            # the search+grab immediately.
+            # ------------------------------------------------------------------
             _LOGGER.debug("Searching releases for %s/%s", source, candidate.source_id)
             try:
                 releases = await self._search_releases(source, int(candidate.source_id))
@@ -736,6 +768,7 @@ class Orchestrator:
                     candidate.source_id,
                     exc_info=True,
                 )
+                # Advance cursor so the next cycle tries a different candidate.
                 self._candidate_cursor[(queue_name, source)] = candidate.source_id
                 return False
 
@@ -743,20 +776,36 @@ class Orchestrator:
 
             if matching:
                 best = max(matching, key=lambda r: r.custom_format_score)
+
+                # ------------------------------------------------------------------
+                # Phase 2: Send the release to SABnzbd (via the Arr grab API).
+                #
+                # On ANY grab failure we do NOT advance the cursor, do NOT set
+                # upgrade_grabbed, and do NOT set _last_search_at.  The next cycle
+                # will retry the same candidate from scratch.  This prevents
+                # double-grabs when SABnzbd was temporarily unreachable and also
+                # stops grab failures from poisoning the search rate-limit.
+                # ------------------------------------------------------------------
                 try:
                     await self._grab_release(source, best)
                 except Exception:
                     _LOGGER.warning(
-                        "Error grabbing release for %s/%s: '%s'",
+                        "Grab failed for %s/%s ('%s') — will retry next cycle;"
+                        " cursor NOT advanced",
                         source,
                         candidate.source_id,
                         best.title,
                         exc_info=True,
                     )
+                    # Persist the search timestamp so we know it was checked.
                     await self._repo.update_metadata(candidate.id, candidate.metadata)
-                    self._candidate_cursor[(queue_name, source)] = candidate.source_id
+                    # Do NOT advance cursor.
+                    # Do NOT set _last_search_at.
+                    # Do NOT set upgrade_grabbed.
                     return False
 
+                # Grab confirmed — record rate-limit timestamp and grabbed flag.
+                self._last_search_at[(queue_name, source)] = datetime.now(UTC)
                 candidate.metadata["upgrade_grabbed"] = True
                 candidate.metadata["upgrade_grabbed_at"] = now_str
                 await self._repo.update_metadata(candidate.id, candidate.metadata)

@@ -37,6 +37,11 @@ class JobIdRequest(BaseModel):
 
 @app.api_route("/api", methods=["GET", "POST"], response_model=None)
 async def api_handler(request: Request) -> JSONResponse | PlainTextResponse:
+    # Simulate being offline: return a non-JSON body so the client raises
+    # SABnzbdConnectionError and the orchestrator skips the entire cycle.
+    if state.is_offline:
+        return PlainTextResponse("Service Unavailable", status_code=503)
+
     params = dict(request.query_params)
     mode = params.get("mode", "")
     apikey = params.get("apikey", "")
@@ -121,14 +126,30 @@ async def control_job_start(body: StartJobRequest) -> dict:
 
 @app.post("/control/job/finish")
 async def control_job_finish(body: JobIdRequest) -> dict:
-    state.remove_job(body.nzo_id)
+    """Move the job to history (simulating successful post-processing)."""
+    state.finish_job(body.nzo_id)
     return {"ok": True}
 
 
 @app.post("/control/job/cancel")
 async def control_job_cancel(body: JobIdRequest) -> dict:
+    """Remove the job without adding it to history (simulating a cancelled download)."""
     state.remove_job(body.nzo_id)
     return {"ok": True}
+
+
+@app.post("/control/go_offline")
+async def control_go_offline() -> dict:
+    """Make the mock return 503 for all /api requests (simulates SABnzbd being down)."""
+    state.is_offline = True
+    return {"ok": True, "is_offline": True}
+
+
+@app.post("/control/go_online")
+async def control_go_online() -> dict:
+    """Restore normal /api behaviour after a simulated outage."""
+    state.is_offline = False
+    return {"ok": True, "is_offline": False}
 
 
 @app.get("/control/state")

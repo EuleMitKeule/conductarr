@@ -49,10 +49,20 @@ class SABnzbdControlClient(_BaseControlClient):
         return str(data["nzo_id"])
 
     async def finish_job(self, nzo_id: str) -> None:
+        """Move the job to history (simulates successful post-processing)."""
         await self._post("/control/job/finish", json={"nzo_id": nzo_id})
 
     async def cancel_job(self, nzo_id: str) -> None:
+        """Remove the job without adding it to history (simulates a cancelled download)."""
         await self._post("/control/job/cancel", json={"nzo_id": nzo_id})
+
+    async def go_offline(self) -> None:
+        """Make the mock return 503 for all /api requests."""
+        await self._post("/control/go_offline")
+
+    async def go_online(self) -> None:
+        """Restore normal mock behaviour after a simulated outage."""
+        await self._post("/control/go_online")
 
     async def get_state(self) -> dict[str, Any]:
         return await self._get("/control/state")

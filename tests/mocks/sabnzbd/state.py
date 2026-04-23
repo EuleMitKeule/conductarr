@@ -26,18 +26,30 @@ class MockJob:
     paused: bool = False
 
 
+@dataclass
+class MockHistoryJob:
+    nzo_id: str
+    filename: str
+    cat: str
+    status: str = "Completed"
+
+
 class SABnzbdState:
     def __init__(self) -> None:
         self.jobs: dict[str, MockJob] = {}
+        self.history: dict[str, MockHistoryJob] = {}
         self.queue_paused: bool = False
         self._counter: int = 0
         self.switch_call_count: int = 0
+        self.is_offline: bool = False
 
     def reset(self) -> None:
         self.jobs.clear()
+        self.history.clear()
         self.queue_paused = False
         self._counter = 0
         self.switch_call_count = 0
+        self.is_offline = False
 
     def generate_nzo_id(self) -> str:
         self._counter += 1
@@ -64,8 +76,26 @@ class SABnzbdState:
         return nzo_id
 
     def remove_job(self, nzo_id: str) -> None:
+        """Remove a job from the queue without adding it to history (e.g. cancel)."""
         self.jobs.pop(nzo_id, None)
         self._reindex()
+
+    def finish_job(self, nzo_id: str) -> None:
+        """Remove a job from the queue and place it into history as Completed.
+
+        This is the authoritative completion path.  The orchestrator uses the
+        SABnzbd history API to detect finished jobs, so a job must pass through
+        ``finish_job`` (not just ``remove_job``) to trigger completion logic.
+        """
+        job = self.jobs.pop(nzo_id, None)
+        self._reindex()
+        if job is not None:
+            self.history[nzo_id] = MockHistoryJob(
+                nzo_id=nzo_id,
+                filename=job.filename,
+                cat=job.cat,
+                status="Completed",
+            )
 
     def _reindex(self) -> None:
         sorted_jobs = sorted(
@@ -160,10 +190,20 @@ class SABnzbdState:
         }
 
     def get_history_response(self) -> dict[str, Any]:
+        slots = [
+            {
+                "nzo_id": h.nzo_id,
+                "name": h.filename,
+                "category": h.cat,
+                "status": h.status,
+                "completed": 1,
+            }
+            for h in self.history.values()
+        ]
         return {
             "history": {
-                "slots": [],
-                "noofslots": 0,
+                "slots": slots,
+                "noofslots": len(slots),
                 "total_size": "0 B",
                 "month_size": "0 B",
                 "week_size": "0 B",
@@ -185,7 +225,16 @@ class SABnzbdState:
                 }
                 for nzo_id, j in self.jobs.items()
             },
+            "history": {
+                nzo_id: {
+                    "nzo_id": h.nzo_id,
+                    "filename": h.filename,
+                    "status": h.status,
+                }
+                for nzo_id, h in self.history.items()
+            },
             "queue_paused": self.queue_paused,
             "counter": self._counter,
             "switch_call_count": self.switch_call_count,
+            "is_offline": self.is_offline,
         }
