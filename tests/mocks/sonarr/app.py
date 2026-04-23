@@ -131,6 +131,7 @@ class ReleaseEpisodeRequest(BaseModel):
 class FinishEpisodeRequest(BaseModel):
     episode_id: int
     custom_format_score: int = 100
+    custom_formats: list[str] = []
 
 
 class CancelEpisodeRequest(BaseModel):
@@ -186,6 +187,7 @@ async def control_episode_finished(body: FinishEpisodeRequest) -> dict:
         raise HTTPException(status_code=404, detail="Episode not found")
     ep.has_file = True
     ep.custom_format_score = body.custom_format_score
+    ep.custom_formats = body.custom_formats
     state.remove_queue_items_for_episode(ep.id)
     return state.episode_to_dict(ep)
 

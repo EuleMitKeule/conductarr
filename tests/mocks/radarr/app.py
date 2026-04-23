@@ -93,6 +93,7 @@ class AddMovieRequest(BaseModel):
     has_file: bool = False
     custom_format_score: int = 0
     tags: list[str] = []
+    custom_formats: list[str] = []
 
 
 class ReleaseMovieRequest(BaseModel):
@@ -103,6 +104,7 @@ class ReleaseMovieRequest(BaseModel):
 class FinishMovieRequest(BaseModel):
     tmdb_id: int
     custom_format_score: int = 100
+    custom_formats: list[str] = []
 
 
 class CancelMovieRequest(BaseModel):
@@ -129,6 +131,7 @@ async def control_movie_add(body: AddMovieRequest) -> dict:
         has_file=body.has_file,
         custom_format_score=body.custom_format_score,
         tag_labels=body.tags,
+        custom_formats=body.custom_formats,
     )
     return state.movie_to_dict(movie)
 
@@ -151,6 +154,7 @@ async def control_movie_finished(body: FinishMovieRequest) -> dict:
         raise HTTPException(status_code=404, detail="Movie not found")
     movie.has_file = True
     movie.custom_format_score = body.custom_format_score
+    movie.custom_formats = body.custom_formats
     state.remove_queue_items_for_movie(movie.id)
     return state.movie_to_dict(movie)
 

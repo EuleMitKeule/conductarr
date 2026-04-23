@@ -8,6 +8,15 @@ from typing import Any
 
 
 @dataclass
+class AssignContext:
+    """Current file-state context passed to matchers during queue assignment."""
+
+    has_file: bool
+    existing_custom_formats: list[str]
+    existing_custom_format_score: int = 0
+
+
+@dataclass
 class VirtualQueue:
     """A named priority tier with matcher rules."""
 

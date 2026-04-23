@@ -74,6 +74,7 @@ class RadarrState:
         has_file: bool = False,
         custom_format_score: int = 0,
         tag_labels: list[str] | None = None,
+        custom_formats: list[str] | None = None,
     ) -> MockMovie:
         self._movie_counter += 1
         tag_ids = [self.find_or_create_tag(label) for label in (tag_labels or [])]
@@ -85,6 +86,7 @@ class RadarrState:
             has_file=has_file,
             custom_format_score=custom_format_score,
             tags=tag_ids,
+            custom_formats=custom_formats or [],
         )
         self.movies[movie.id] = movie
         return movie

@@ -83,6 +83,7 @@ class RadarrControlClient(_BaseControlClient):
         has_file: bool = False,
         custom_format_score: int = 0,
         tags: list[str] | None = None,
+        custom_formats: list[str] | None = None,
     ) -> dict[str, Any]:
         return await self._post(
             "/control/movie/add",
@@ -93,6 +94,7 @@ class RadarrControlClient(_BaseControlClient):
                 "has_file": has_file,
                 "custom_format_score": custom_format_score,
                 "tags": tags or [],
+                "custom_formats": custom_formats or [],
             },
         )
 
@@ -103,11 +105,18 @@ class RadarrControlClient(_BaseControlClient):
         )
 
     async def finish_movie(
-        self, tmdb_id: int, custom_format_score: int = 100
+        self,
+        tmdb_id: int,
+        custom_format_score: int = 100,
+        custom_formats: list[str] | None = None,
     ) -> dict[str, Any]:
         return await self._post(
             "/control/movie/finished",
-            json={"tmdb_id": tmdb_id, "custom_format_score": custom_format_score},
+            json={
+                "tmdb_id": tmdb_id,
+                "custom_format_score": custom_format_score,
+                "custom_formats": custom_formats or [],
+            },
         )
 
     async def cancel_movie(self, tmdb_id: int) -> None:
@@ -150,11 +159,18 @@ class SonarrControlClient(_BaseControlClient):
         )
 
     async def finish_episode(
-        self, episode_id: int, custom_format_score: int = 100
+        self,
+        episode_id: int,
+        custom_format_score: int = 100,
+        custom_formats: list[str] | None = None,
     ) -> dict[str, Any]:
         return await self._post(
             "/control/episode/finished",
-            json={"episode_id": episode_id, "custom_format_score": custom_format_score},
+            json={
+                "episode_id": episode_id,
+                "custom_format_score": custom_format_score,
+                "custom_formats": custom_formats or [],
+            },
         )
 
     async def cancel_episode(self, episode_id: int) -> None:

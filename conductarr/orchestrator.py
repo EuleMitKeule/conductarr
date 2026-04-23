@@ -17,6 +17,15 @@ The poll cycle runs every ``poll_interval`` seconds and executes in order:
 6. For each upgrade queue: if below max_active, search for the next eligible
    candidate and grab a release.  The cursor position is kept in memory so
    each cycle continues where it left off.
+
+Virtual queue vs. resolved queue
+---------------------------------
+``virtual_queue`` persisted in the DB is used solely for upgrade candidate
+tracking (cursor, slot counting, metadata).  For SABnzbd slot ordering the
+orchestrator derives a *resolved queue* at the time of resolution.  For
+conductarr-initiated downloads these are the same value.  For externally
+initiated downloads the resolved queue is computed fresh from current file
+state without overwriting the DB record, so upgrade tracking is unaffected.
 """
 
 from __future__ import annotations
@@ -41,7 +50,7 @@ from conductarr.config import (
 from conductarr.db.database import Database
 from conductarr.db.repository import QueueRepository
 from conductarr.queue.matchers import MATCHER_REGISTRY
-from conductarr.queue.models import QueueItem, VirtualQueue
+from conductarr.queue.models import AssignContext, QueueItem, VirtualQueue
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -161,6 +170,11 @@ class Orchestrator:
         self._upgrade_queue_configs: list[VirtualQueueConfig] = [
             q for q in config.queues if q.upgrade is not None and q.upgrade.enabled
         ]
+
+        # Fast lookup of upgrade config keyed by queue name (used in _find_queue_for_item)
+        self._upgrade_config_by_queue: dict[str, UpgradeConfig] = {
+            q.name: q.upgrade for q in config.queues if q.upgrade is not None
+        }
 
         # nzo_id → resolved cache entry (survives restart via DB warm-up)
         self._nzo_cache: dict[str, _NzoCacheEntry] = {}
@@ -342,16 +356,37 @@ class Orchestrator:
             except Exception:
                 _LOGGER.warning("Failed to fetch tags for Radarr movie %s", source_id)
 
+            context = await self._build_assign_context("radarr", radarr_item.movie_id)
+
             item = await self._repo.get_item("radarr", source_id)
             if item is None:
                 item = QueueItem(source="radarr", source_id=source_id, tags=tags)
-                item = await self._assign_queue(item)
-            elif item.id is not None:
-                # Ensure job map exists (may be missing after restart)
-                if await self._repo.get_job_map(nzo_id) is None:
-                    await self._repo.upsert_job_map(
-                        nzo_id, item.id, item.virtual_queue or ""
+                item = await self._assign_queue(item, context)
+            else:
+                existing_job_map = await self._repo.get_job_map(nzo_id)
+                if existing_job_map is None:
+                    # External grab: re-derive queue for ordering; do NOT persist
+                    item.tags = tags
+                    resolved_queue = self._assign_queue_for_ordering(item, context)
+                    if item.id is not None:
+                        await self._repo.upsert_job_map(
+                            nzo_id, item.id, item.virtual_queue or ""
+                        )
+                    _LOGGER.info(
+                        "Resolved nzo_id=%s → Radarr '%s' (movie_id=%s)"
+                        " → queue=%s (external grab)",
+                        nzo_id,
+                        radarr_item.title,
+                        source_id,
+                        resolved_queue,
                     )
+                    return _NzoCacheEntry(
+                        source="radarr",
+                        source_id=source_id,
+                        virtual_queue=resolved_queue,
+                        tags=tags,
+                    )
+                # Conductarr grab: job map already exists — nothing to update
 
             if item.id is not None and await self._repo.get_job_map(nzo_id) is None:
                 await self._repo.upsert_job_map(
@@ -382,15 +417,37 @@ class Orchestrator:
             except Exception:
                 _LOGGER.warning("Failed to fetch tags for Sonarr episode %s", source_id)
 
+            context = await self._build_assign_context("sonarr", sonarr_item.episode_id)
+
             item = await self._repo.get_item("sonarr", source_id)
             if item is None:
                 item = QueueItem(source="sonarr", source_id=source_id, tags=tags)
-                item = await self._assign_queue(item)
-            elif item.id is not None:
-                if await self._repo.get_job_map(nzo_id) is None:
-                    await self._repo.upsert_job_map(
-                        nzo_id, item.id, item.virtual_queue or ""
+                item = await self._assign_queue(item, context)
+            else:
+                existing_job_map = await self._repo.get_job_map(nzo_id)
+                if existing_job_map is None:
+                    # External grab: re-derive queue for ordering; do NOT persist
+                    item.tags = tags
+                    resolved_queue = self._assign_queue_for_ordering(item, context)
+                    if item.id is not None:
+                        await self._repo.upsert_job_map(
+                            nzo_id, item.id, item.virtual_queue or ""
+                        )
+                    _LOGGER.info(
+                        "Resolved nzo_id=%s → Sonarr '%s' (episode_id=%s)"
+                        " → queue=%s (external grab)",
+                        nzo_id,
+                        sonarr_item.title,
+                        source_id,
+                        resolved_queue,
                     )
+                    return _NzoCacheEntry(
+                        source="sonarr",
+                        source_id=source_id,
+                        virtual_queue=resolved_queue,
+                        tags=tags,
+                    )
+                # Conductarr grab: job map already exists — nothing to update
 
             if item.id is not None and await self._repo.get_job_map(nzo_id) is None:
                 await self._repo.upsert_job_map(
@@ -418,12 +475,15 @@ class Orchestrator:
             source=None, source_id=None, virtual_queue=None, tags=[], unknown=True
         )
 
-    async def _assign_queue(self, item: QueueItem) -> QueueItem:
-        """Assign *item* to the highest-priority matching virtual queue.
+    def _find_queue_for_item(
+        self, item: QueueItem, context: AssignContext
+    ) -> tuple[str | None, bool]:
+        """Return ``(queue_name, is_fallback)`` without any side-effects.
 
-        Non-fallback queues are evaluated first.  If none matches, the item
-        falls back to the highest-priority fallback queue.  Either way the item
-        is persisted via the repository.
+        Applies the upgrade auto-condition: upgrade-configured queues are
+        skipped when the item has no existing file (cannot be an upgrade) or
+        when the existing file already satisfies all accept_conditions (no
+        upgrade needed).  Both checks are implicit — no extra matcher required.
         """
         fallback_queue: str | None = None
         for vq in self._virtual_queues:
@@ -431,32 +491,146 @@ class Orchestrator:
                 if fallback_queue is None:
                     fallback_queue = vq.name
                 continue
+            # Auto-skip upgrade queues based on current file state
+            upgrade_cfg = self._upgrade_config_by_queue.get(vq.name)
+            if upgrade_cfg is not None:
+                if not context.has_file:
+                    # No existing file → cannot be an upgrade candidate
+                    continue
+                if _media_satisfies_conditions(
+                    context.existing_custom_formats,
+                    context.existing_custom_format_score,
+                    upgrade_cfg.accept_conditions,
+                ):
+                    # Already satisfies conditions → no upgrade needed
+                    continue
             for matcher_config in vq.matchers:
                 matcher_type = matcher_config.get("type")
                 matcher_cls = MATCHER_REGISTRY.get(matcher_type)  # type: ignore[arg-type]
                 if matcher_cls is None:
                     _LOGGER.warning("Unknown matcher type: %s", matcher_type)
                     continue
-                if matcher_cls().matches(item, matcher_config):
-                    item.virtual_queue = vq.name
-                    _LOGGER.info(
-                        "Assigned %s/%s → queue '%s'",
-                        item.source,
-                        item.source_id,
-                        vq.name,
-                    )
-                    return await self._repo.upsert_item(item)
+                if matcher_cls().matches(item, matcher_config, context):
+                    return vq.name, False
+        return fallback_queue, True
 
-        if fallback_queue is not None:
-            item.virtual_queue = fallback_queue
-            _LOGGER.info(
-                "Assigned %s/%s → fallback queue '%s'",
-                item.source,
-                item.source_id,
-                fallback_queue,
-            )
+    async def _assign_queue(self, item: QueueItem, context: AssignContext) -> QueueItem:
+        """Assign *item* to the highest-priority matching virtual queue.
 
+        Non-fallback queues are evaluated first.  If none matches, the item
+        falls back to the highest-priority fallback queue.  Either way the item
+        is persisted via the repository.
+        """
+        queue_name, is_fallback = self._find_queue_for_item(item, context)
+        if queue_name is not None:
+            item.virtual_queue = queue_name
+            if is_fallback:
+                _LOGGER.info(
+                    "Assigned %s/%s → fallback queue '%s'",
+                    item.source,
+                    item.source_id,
+                    queue_name,
+                )
+            else:
+                _LOGGER.info(
+                    "Assigned %s/%s → queue '%s'",
+                    item.source,
+                    item.source_id,
+                    queue_name,
+                )
         return await self._repo.upsert_item(item)
+
+    def _assign_queue_for_ordering(
+        self, item: QueueItem, context: AssignContext
+    ) -> str | None:
+        """Resolve the queue name for slot ordering without persisting the result.
+
+        Used for externally-initiated downloads whose ``virtual_queue`` in the
+        DB must remain unchanged (upgrade cursor depends on it).
+        """
+        queue_name, _ = self._find_queue_for_item(item, context)
+        return queue_name
+
+    async def _build_assign_context(
+        self, source: str, source_item_id: int
+    ) -> AssignContext:
+        """Fetch current file state and return an :class:`AssignContext`.
+
+        Falls back to ``has_file=True, existing_custom_formats=[]`` on any
+        error — this is the safe direction: all matchers can still run and
+        no upgrade queue is silently skipped.
+        """
+        _safe_default = AssignContext(
+            has_file=True,
+            existing_custom_formats=[],
+            existing_custom_format_score=0,
+        )
+        try:
+            if source == "radarr":
+                movie = await self._radarr.get_movie(source_item_id)
+                if movie is None:
+                    return _safe_default
+                if not movie.has_file:
+                    return AssignContext(
+                        has_file=False,
+                        existing_custom_formats=[],
+                        existing_custom_format_score=0,
+                    )
+                movie_file = await self._radarr.get_movie_file(source_item_id)
+                if movie_file is not None:
+                    return AssignContext(
+                        has_file=True,
+                        existing_custom_formats=[
+                            cf.get("name", "")
+                            for cf in movie_file.get("customFormats", [])
+                        ],
+                        existing_custom_format_score=movie_file.get(
+                            "customFormatScore", movie.custom_format_score
+                        ),
+                    )
+                return AssignContext(
+                    has_file=True,
+                    existing_custom_formats=movie.custom_formats,
+                    existing_custom_format_score=movie.custom_format_score,
+                )
+            if source == "sonarr":
+                episode = await self._sonarr.get_episode(source_item_id)
+                if episode is None:
+                    return _safe_default
+                if not episode.has_file:
+                    return AssignContext(
+                        has_file=False,
+                        existing_custom_formats=[],
+                        existing_custom_format_score=0,
+                    )
+                if episode.episode_file_id is not None:
+                    ep_file = await self._sonarr.get_episode_file(
+                        episode.episode_file_id
+                    )
+                    if ep_file is not None:
+                        return AssignContext(
+                            has_file=True,
+                            existing_custom_formats=[
+                                cf.get("name", "")
+                                for cf in ep_file.get("customFormats", [])
+                            ],
+                            existing_custom_format_score=ep_file.get(
+                                "customFormatScore", episode.custom_format_score
+                            ),
+                        )
+                return AssignContext(
+                    has_file=True,
+                    existing_custom_formats=episode.custom_formats,
+                    existing_custom_format_score=episode.custom_format_score,
+                )
+        except Exception:
+            _LOGGER.debug(
+                "Failed to build assign context for %s/%d",
+                source,
+                source_item_id,
+                exc_info=True,
+            )
+        return _safe_default
 
     # ------------------------------------------------------------------
     # Step 3: Handle completed jobs
