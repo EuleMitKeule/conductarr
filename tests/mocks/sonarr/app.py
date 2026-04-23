@@ -75,6 +75,16 @@ async def get_episodes(
     ]
 
 
+@app.get("/api/v3/episodeFile/{episode_file_id}")
+async def get_episode_file(
+    episode_file_id: int, _: None = Depends(_require_api_key)
+) -> dict:
+    ep = state.episodes.get(episode_file_id)
+    if ep is None or not ep.has_file:
+        raise HTTPException(status_code=404, detail="EpisodeFile not found")
+    return state.episode_file_to_dict(ep)
+
+
 @app.get("/api/v3/tag")
 async def get_tags(_: None = Depends(_require_api_key)) -> list[dict]:
     return [state.tag_to_dict(t) for t in state.tags.values()]

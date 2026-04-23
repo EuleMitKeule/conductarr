@@ -854,21 +854,81 @@ class Orchestrator:
         source_id: str,
         conditions: list[Any],
     ) -> bool:
-        """Return True if the current media already satisfies all accept_conditions."""
+        """Return True if the current media already satisfies all accept_conditions.
+
+        Fetches file-level custom-format data (more reliable than the bulk
+        /movie or /episode endpoint) and falls back to media-level values when
+        the file record is unavailable.  Debug-logs the actual score and
+        format list used so this class of bug is immediately visible in logs.
+        """
         if source == "radarr":
             movie = await self._radarr.get_movie(int(source_id))
             if movie is None:
                 return False
-            return _media_satisfies_conditions(
-                movie.custom_formats, movie.custom_format_score, conditions
+            # Seed from movie-level score (reliable); update with file-level
+            # customFormats which is more accurate for named-format conditions.
+            custom_formats: list[str] = movie.custom_formats
+            custom_format_score: int = movie.custom_format_score
+            try:
+                movie_file = await self._radarr.get_movie_file(int(source_id))
+                if movie_file is not None:
+                    custom_formats = [
+                        cf.get("name", "") for cf in movie_file.get("customFormats", [])
+                    ]
+                    custom_format_score = movie_file.get(
+                        "customFormatScore", custom_format_score
+                    )
+            except Exception:
+                _LOGGER.debug(
+                    "radarr/%s: could not fetch movieFile, using movie-level data",
+                    source_id,
+                    exc_info=True,
+                )
+            _LOGGER.debug(
+                "radarr/%s: satisfies_conditions check — score=%d formats=%s",
+                source_id,
+                custom_format_score,
+                custom_formats,
             )
+            return _media_satisfies_conditions(
+                custom_formats, custom_format_score, conditions
+            )
+
         if source == "sonarr":
             episode = await self._sonarr.get_episode(int(source_id))
             if episode is None:
                 return False
-            return _media_satisfies_conditions(
-                episode.custom_formats, episode.custom_format_score, conditions
+            custom_formats = episode.custom_formats
+            custom_format_score = episode.custom_format_score
+            if episode.episode_file_id is not None:
+                try:
+                    ep_file = await self._sonarr.get_episode_file(
+                        episode.episode_file_id
+                    )
+                    if ep_file is not None:
+                        custom_formats = [
+                            cf.get("name", "")
+                            for cf in ep_file.get("customFormats", [])
+                        ]
+                        custom_format_score = ep_file.get(
+                            "customFormatScore", custom_format_score
+                        )
+                except Exception:
+                    _LOGGER.debug(
+                        "sonarr/%s: could not fetch episodeFile, using episode-level data",
+                        source_id,
+                        exc_info=True,
+                    )
+            _LOGGER.debug(
+                "sonarr/%s: satisfies_conditions check — score=%d formats=%s",
+                source_id,
+                custom_format_score,
+                custom_formats,
             )
+            return _media_satisfies_conditions(
+                custom_formats, custom_format_score, conditions
+            )
+
         return False
 
     async def _search_releases(self, source: str, item_id: int) -> list[ReleaseResult]:
@@ -923,12 +983,11 @@ class Orchestrator:
             return
         seeded = 0
         for movie in movies:
-            if _media_satisfies_conditions(
-                movie.custom_formats,
-                movie.custom_format_score,
-                upgrade.accept_conditions,
-            ):
-                continue
+            # Do not pre-filter by accept_conditions here: the bulk /movie
+            # endpoint does not reliably populate customFormats in all Radarr
+            # versions, so filtering here would incorrectly exclude items that
+            # already satisfy conditions.  The per-cycle _check_satisfies_conditions
+            # call uses the authoritative /movieFile endpoint instead.
             if await self._repo.get_item("radarr", str(movie.id)) is None:
                 await self._repo.upsert_item(
                     QueueItem(
@@ -957,12 +1016,11 @@ class Orchestrator:
                 )
                 continue
             for episode in episodes:
-                if _media_satisfies_conditions(
-                    episode.custom_formats,
-                    episode.custom_format_score,
-                    upgrade.accept_conditions,
-                ):
-                    continue
+                # Do not pre-filter by accept_conditions here: the /episode
+                # endpoint does not reliably populate customFormats, so
+                # filtering here would incorrectly exclude satisfied items.
+                # The per-cycle _check_satisfies_conditions call uses the
+                # authoritative /episodeFile endpoint instead.
                 if await self._repo.get_item("sonarr", str(episode.id)) is None:
                     await self._repo.upsert_item(
                         QueueItem(

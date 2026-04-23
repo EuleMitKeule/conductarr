@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from .state import RadarrState
@@ -56,6 +56,17 @@ async def get_movies(_: None = Depends(_require_api_key)) -> list[dict]:
 @app.get("/api/v3/tag")
 async def get_tags(_: None = Depends(_require_api_key)) -> list[dict]:
     return [state.tag_to_dict(t) for t in state.tags.values()]
+
+
+@app.get("/api/v3/movieFile")
+async def get_movie_file(
+    movieId: int = Query(...),  # noqa: N803
+    _: None = Depends(_require_api_key),
+) -> list[dict]:
+    movie = state.movies.get(movieId)
+    if movie is None or not movie.has_file:
+        return []
+    return [state.movie_file_to_dict(movie)]
 
 
 @app.get("/api/v3/queue")

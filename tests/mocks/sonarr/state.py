@@ -26,6 +26,7 @@ class MockEpisode:
     monitored: bool = True
     has_file: bool = False
     custom_format_score: int = 0
+    custom_formats: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -158,7 +159,7 @@ class SonarrState:
         }
 
     def episode_to_dict(self, ep: MockEpisode) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "id": ep.id,
             "seriesId": ep.series_id,
             "seasonNumber": ep.season_number,
@@ -167,6 +168,25 @@ class SonarrState:
             "monitored": ep.monitored,
             "hasFile": ep.has_file,
             "customFormatScore": ep.custom_format_score,
+            "customFormats": [
+                {"id": i + 1, "name": name} for i, name in enumerate(ep.custom_formats)
+            ],
+        }
+        if ep.has_file:
+            result["episodeFileId"] = ep.id
+        return result
+
+    def episode_file_to_dict(self, ep: MockEpisode) -> dict[str, Any]:
+        """Return a /api/v3/episodeFile record for the given episode."""
+        return {
+            "id": ep.id,
+            "episodeId": ep.id,
+            "seriesId": ep.series_id,
+            "relativePath": f"Season {ep.season_number}/{ep.title}.mkv",
+            "customFormatScore": ep.custom_format_score,
+            "customFormats": [
+                {"id": i + 1, "name": name} for i, name in enumerate(ep.custom_formats)
+            ],
         }
 
     def queue_item_to_dict(self, item: MockQueueItem) -> dict[str, Any]:

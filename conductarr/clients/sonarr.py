@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 from urllib.parse import urlparse
 
+import aiohttp
 from pyarr import AsyncSonarr
 from pyarr.exceptions import (
     PyarrConnectionError,
@@ -73,6 +74,7 @@ class SonarrEpisode:
     has_file: bool
     custom_format_score: int
     custom_formats: list[str] = field(default_factory=list)
+    episode_file_id: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +403,35 @@ class SonarrClient:
             raise SonarrError(str(exc)) from exc
         _LOGGER.debug("Sonarr grab_release: successfully grabbed '%s'", release.title)
 
+    async def get_episode_file(self, episode_file_id: int) -> dict[str, Any] | None:
+        """Return the episode-file record for *episode_file_id*, or None.
+
+        Calls ``/api/v3/episodeFile/{id}`` which reliably populates
+        ``customFormats`` and ``customFormatScore`` for the actual file on
+        disk, unlike the ``/api/v3/episode`` endpoint.
+        """
+        _LOGGER.debug("Sonarr get_episode_file: episode_file_id=%d", episode_file_id)
+        url = f"{self._url.rstrip('/')}/api/v3/episodeFile/{episode_file_id}"
+        headers = {"X-Api-Key": self._api_key}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status == 404:
+                        return None
+                    resp.raise_for_status()
+                    data: dict[str, Any] = await resp.json()
+        except aiohttp.ServerTimeoutError as exc:
+            raise SonarrConnectionError(str(exc)) from exc
+        except aiohttp.ClientError as exc:
+            raise SonarrConnectionError(str(exc)) from exc
+        _LOGGER.debug(
+            "Sonarr get_episode_file: episode_file_id=%d → score=%d formats=%s",
+            episode_file_id,
+            data.get("customFormatScore", 0),
+            [cf.get("name", "") for cf in data.get("customFormats", [])],
+        )
+        return data
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -430,4 +461,5 @@ class SonarrClient:
             has_file=data.get("hasFile", False),
             custom_format_score=data.get("customFormatScore", 0),
             custom_formats=[cf.get("name", "") for cf in data.get("customFormats", [])],
+            episode_file_id=data.get("episodeFileId") or None,
         )

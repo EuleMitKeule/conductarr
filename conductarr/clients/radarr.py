@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 from urllib.parse import urlparse
 
+import aiohttp
 from pyarr import AsyncRadarr
 from pyarr.exceptions import (
     PyarrConnectionError,
@@ -295,6 +296,40 @@ class RadarrClient:
         except Exception as exc:
             raise RadarrError(str(exc)) from exc
         _LOGGER.debug("Radarr grab_release: successfully grabbed '%s'", release.title)
+
+    async def get_movie_file(self, movie_id: int) -> dict[str, Any] | None:
+        """Return the first movie-file record for *movie_id*, or None.
+
+        Calls ``/api/v3/movieFile?movieId={id}`` which reliably populates
+        ``customFormats`` and ``customFormatScore`` from the actual file on
+        disk, unlike the ``/api/v3/movie`` endpoint whose ``customFormats``
+        list is not populated in all Radarr versions / states.
+        """
+        _LOGGER.debug("Radarr get_movie_file: movie_id=%d", movie_id)
+        url = f"{self._url.rstrip('/')}/api/v3/movieFile"
+        headers = {"X-Api-Key": self._api_key}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url, headers=headers, params={"movieId": str(movie_id)}
+                ) as resp:
+                    if resp.status == 404:
+                        return None
+                    resp.raise_for_status()
+                    data: list[dict[str, Any]] = await resp.json()
+        except aiohttp.ServerTimeoutError as exc:
+            raise RadarrConnectionError(str(exc)) from exc
+        except aiohttp.ClientError as exc:
+            raise RadarrConnectionError(str(exc)) from exc
+        if not data:
+            return None
+        _LOGGER.debug(
+            "Radarr get_movie_file: movie_id=%d → score=%d formats=%s",
+            movie_id,
+            data[0].get("customFormatScore", 0),
+            [cf.get("name", "") for cf in data[0].get("customFormats", [])],
+        )
+        return data[0]
 
     # ------------------------------------------------------------------
     # Helpers

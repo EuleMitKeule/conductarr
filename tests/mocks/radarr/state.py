@@ -16,6 +16,7 @@ class MockMovie:
     custom_format_score: int = 0
     quality_profile_id: int = 1
     tags: list[int] = field(default_factory=list)
+    custom_formats: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -132,10 +133,27 @@ class RadarrState:
             result["movieFile"] = {
                 "quality": {"quality": {"name": "Bluray-1080p"}},
                 "customFormatScore": movie.custom_format_score,
+                "customFormats": [
+                    {"id": i + 1, "name": name}
+                    for i, name in enumerate(movie.custom_formats)
+                ],
             }
         else:
             result["movieFile"] = None
         return result
+
+    def movie_file_to_dict(self, movie: MockMovie) -> dict[str, Any]:
+        """Return a /api/v3/movieFile record for the given movie."""
+        return {
+            "id": movie.id,
+            "movieId": movie.id,
+            "relativePath": f"{movie.title}.mkv",
+            "customFormatScore": movie.custom_format_score,
+            "customFormats": [
+                {"id": i + 1, "name": name}
+                for i, name in enumerate(movie.custom_formats)
+            ],
+        }
 
     def queue_item_to_dict(self, item: MockQueueItem) -> dict[str, Any]:
         return {
