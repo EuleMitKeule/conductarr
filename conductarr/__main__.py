@@ -33,6 +33,7 @@ from conductarr.const import (
     VERSION,
     LogLevel,
 )
+from conductarr.engine import ConductarrEngine
 from conductarr.log import setup_logging
 
 _LOGGER = logging.getLogger(APP_NAME)
@@ -128,12 +129,9 @@ def watch(
     config = _init_config(
         config_dir, config_file_name, log_level, log_dir, log_file_name
     )
-
     conductarr_config = ConductarrConfig.from_yaml(
         config.config_dir / config.config_file
     )
-
-    from conductarr.engine import ConductarrEngine
 
     engine = ConductarrEngine(conductarr_config, database_config=config.database)
 
@@ -144,7 +142,6 @@ def watch(
         finally:
             await engine.stop()
 
-    _LOGGER.info("Starting watch mode")
     try:
         asyncio.run(_run())
     except KeyboardInterrupt:

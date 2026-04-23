@@ -147,11 +147,18 @@ class SABnzbdClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _request(self, **params: Any) -> Any:
+    async def _request(self, *, silent: bool = False, **params: Any) -> Any:
         """Perform a GET request to ``/api`` and return the parsed JSON body.
 
         The ``output=json`` and ``apikey`` params are always injected.
         Raises the appropriate :class:`SABnzbdError` subclass on failure.
+
+        Parameters
+        ----------
+        silent:
+            When ``True`` the outgoing request is not logged at DEBUG level.
+            Use this for high-frequency polling calls (e.g. ``get_queue``)
+            to avoid log spam on idle cycles.
         """
         base = self.url.rstrip("/")
         endpoint = f"{base}/api"
@@ -161,11 +168,12 @@ class SABnzbdClient:
             **params,
         }
 
-        _LOGGER.debug(
-            "SABnzbd GET %s params=%s",
-            endpoint,
-            {k: v for k, v in all_params.items() if k != "apikey"},
-        )
+        if not silent:
+            _LOGGER.debug(
+                "SABnzbd GET %s params=%s",
+                endpoint,
+                {k: v for k, v in all_params.items() if k != "apikey"},
+            )
 
         owns_session = self._session is None
         session: aiohttp.ClientSession = (
@@ -196,8 +204,6 @@ class SABnzbdClient:
                 "SABnzbd returned an empty response (likely a refused hostname)"
             )
 
-        _LOGGER.debug("SABnzbd response: %s", text[:2000])
-
         try:
             data: Any = _loads(text)
         except Exception as exc:
@@ -216,7 +222,7 @@ class SABnzbdClient:
 
     async def get_queue(self) -> Queue:
         """Return the current download queue."""
-        data = await self._request(mode="queue")
+        data = await self._request(silent=True, mode="queue")
         return Queue.from_dict(data)
 
     async def pause_job(self, nzo_id: str) -> bool:

@@ -49,7 +49,6 @@ class QueueRepository:
             item.last_tried_at.isoformat() if item.last_tried_at else None,
             json.dumps(item.metadata),
         )
-        _LOGGER.debug("DB query: %s | params: %s", sql.strip(), str(params)[:200])
         await self._db.execute(sql, params)
         return await self._get_item_by_unique(item.source, item.source_id)  # type: ignore[return-value]
 
@@ -60,11 +59,7 @@ class QueueRepository:
     async def get_item_by_id(self, item_id: int) -> QueueItem | None:
         """Fetch a single queue item by its primary key."""
         sql = "SELECT * FROM queue_items WHERE id = ?"
-        params = (item_id,)
-        _LOGGER.debug("DB query: %s | params: %s", sql.strip(), str(params)[:200])
-        row = await self._db.fetchone(sql, params)
-        found = row is not None
-        _LOGGER.debug("DB fetchone: id=%d found=%s", item_id, found)
+        row = await self._db.fetchone(sql, (item_id,))
         return self._row_to_item(row) if row else None
 
     async def get_items_by_queue(self, virtual_queue: str) -> list[QueueItem]:
@@ -74,40 +69,32 @@ class QueueRepository:
             WHERE virtual_queue = ?
             ORDER BY attempts ASC, last_tried_at ASC NULLS FIRST
             """
-        params = (virtual_queue,)
-        _LOGGER.debug("DB query: %s | params: %s", sql.strip(), str(params)[:200])
-        rows = await self._db.fetchall(sql, params)
-        _LOGGER.debug(
-            "DB fetchall: virtual_queue='%s' row_count=%d", virtual_queue, len(rows)
-        )
+        rows = await self._db.fetchall(sql, (virtual_queue,))
         return [self._row_to_item(r) for r in rows]
 
     async def get_items_by_status(self, status: str) -> list[QueueItem]:
         """Return all items with the given status."""
         sql = "SELECT * FROM queue_items WHERE status = ?"
-        params = (status,)
-        _LOGGER.debug("DB query: %s | params: %s", sql.strip(), str(params)[:200])
-        rows = await self._db.fetchall(sql, params)
-        _LOGGER.debug("DB fetchall: status='%s' row_count=%d", status, len(rows))
+        rows = await self._db.fetchall(sql, (status,))
         return [self._row_to_item(r) for r in rows]
 
     async def update_status(self, item_id: int, status: str) -> None:
         """Update the status of a queue item."""
-        sql = "UPDATE queue_items SET status = ?, updated_at = datetime('now') WHERE id = ?"
-        params = (status, item_id)
-        _LOGGER.debug("DB query: %s | params: %s", sql.strip(), str(params)[:200])
-        await self._db.execute(sql, params)
+        await self._db.execute(
+            "UPDATE queue_items SET status = ?, updated_at = datetime('now') WHERE id = ?",
+            (status, item_id),
+        )
 
     async def update_metadata(self, item_id: int, metadata: dict[str, Any]) -> None:
         """Overwrite the metadata JSON for a queue item."""
-        sql = """
+        await self._db.execute(
+            """
             UPDATE queue_items
             SET metadata = ?, updated_at = datetime('now')
             WHERE id = ?
-            """
-        params = (json.dumps(metadata), item_id)
-        _LOGGER.debug("DB query: %s | params: %s", sql.strip(), str(params)[:200])
-        await self._db.execute(sql, params)
+            """,
+            (json.dumps(metadata), item_id),
+        )
 
     async def get_upgrade_candidates(
         self,
@@ -138,11 +125,11 @@ class QueueRepository:
               )
             ORDER BY CAST(source_id AS INTEGER) ASC
             """
-        params = (virtual_queue, source, str(retry_after_days))
-        _LOGGER.debug("DB query: %s | params: %s", sql.strip(), str(params)[:200])
-        rows = await self._db.fetchall(sql, params)
+        rows = await self._db.fetchall(
+            sql, (virtual_queue, source, str(retry_after_days))
+        )
         _LOGGER.debug(
-            "DB fetchall: upgrade_candidates virtual_queue='%s' source='%s' row_count=%d",
+            "upgrade_candidates '%s'/%s: %d eligible",
             virtual_queue,
             source,
             len(rows),
@@ -151,16 +138,16 @@ class QueueRepository:
 
     async def increment_attempts(self, item_id: int) -> None:
         """Increment attempts and set last_tried_at for rotation."""
-        sql = """
+        await self._db.execute(
+            """
             UPDATE queue_items
             SET attempts = attempts + 1,
                 last_tried_at = datetime('now'),
                 updated_at = datetime('now')
             WHERE id = ?
-            """
-        params = (item_id,)
-        _LOGGER.debug("DB query: %s | params: %s", sql.strip(), str(params)[:200])
-        await self._db.execute(sql, params)
+            """,
+            (item_id,),
+        )
 
     # ------------------------------------------------------------------
     # sabnzbd_job_map
@@ -168,46 +155,37 @@ class QueueRepository:
 
     async def count_grabbed_not_in_jobmap(self, virtual_queue: str) -> int:
         """Count items grabbed but not yet in the job map (in-flight grabs)."""
-        sql = """
+        row = await self._db.fetchone(
+            """
             SELECT COUNT(*) FROM queue_items qi
             WHERE qi.virtual_queue = ?
               AND json_extract(qi.metadata, '$.upgrade_grabbed') IS 1
               AND qi.id NOT IN (SELECT queue_item_id FROM sabnzbd_job_map WHERE queue_item_id IS NOT NULL)
-            """
-        params = (virtual_queue,)
-        _LOGGER.debug("DB query: %s | params: %s", sql.strip(), str(params)[:200])
-        row = await self._db.fetchone(sql, params)
-        count = row[0] if row else 0
-        _LOGGER.debug(
-            "DB fetchone: count_grabbed_not_in_jobmap virtual_queue='%s' count=%d",
-            virtual_queue,
-            count,
+            """,
+            (virtual_queue,),
         )
-        return count
+        return row[0] if row else 0
 
     async def upsert_job_map(
         self, nzo_id: str, queue_item_id: int, virtual_queue: str
     ) -> None:
         """Create or update a SABnzbd job mapping."""
-        sql = """
+        await self._db.execute(
+            """
             INSERT INTO sabnzbd_job_map (nzo_id, queue_item_id, virtual_queue)
             VALUES (?, ?, ?)
             ON CONFLICT(nzo_id) DO UPDATE SET
                 queue_item_id = excluded.queue_item_id,
                 virtual_queue = excluded.virtual_queue
-            """
-        params = (nzo_id, queue_item_id, virtual_queue)
-        _LOGGER.debug("DB query: %s | params: %s", sql.strip(), str(params)[:200])
-        await self._db.execute(sql, params)
+            """,
+            (nzo_id, queue_item_id, virtual_queue),
+        )
 
     async def get_job_map(self, nzo_id: str) -> dict[str, Any] | None:
         """Look up a SABnzbd job mapping by nzo_id."""
-        sql = "SELECT * FROM sabnzbd_job_map WHERE nzo_id = ?"
-        params = (nzo_id,)
-        _LOGGER.debug("DB query: %s | params: %s", sql.strip(), str(params)[:200])
-        row = await self._db.fetchone(sql, params)
-        found = row is not None
-        _LOGGER.debug("DB fetchone: get_job_map nzo_id=%s found=%s", nzo_id, found)
+        row = await self._db.fetchone(
+            "SELECT * FROM sabnzbd_job_map WHERE nzo_id = ?", (nzo_id,)
+        )
         if row is None:
             return None
         return {
@@ -219,17 +197,13 @@ class QueueRepository:
 
     async def delete_job_map(self, nzo_id: str) -> None:
         """Delete a SABnzbd job mapping."""
-        sql = "DELETE FROM sabnzbd_job_map WHERE nzo_id = ?"
-        params = (nzo_id,)
-        _LOGGER.debug("DB query: %s | params: %s", sql.strip(), str(params)[:200])
-        await self._db.execute(sql, params)
+        await self._db.execute(
+            "DELETE FROM sabnzbd_job_map WHERE nzo_id = ?", (nzo_id,)
+        )
 
     async def get_all_job_maps(self) -> list[dict[str, Any]]:
         """Return all SABnzbd job mappings."""
-        sql = "SELECT * FROM sabnzbd_job_map"
-        _LOGGER.debug("DB query: %s | params: ()", sql.strip())
-        rows = await self._db.fetchall(sql)
-        _LOGGER.debug("DB fetchall: get_all_job_maps row_count=%d", len(rows))
+        rows = await self._db.fetchall("SELECT * FROM sabnzbd_job_map")
         return [
             {
                 "nzo_id": row[0],
@@ -247,13 +221,9 @@ class QueueRepository:
     async def _get_item_by_unique(
         self, source: str, source_id: str
     ) -> QueueItem | None:
-        sql = "SELECT * FROM queue_items WHERE source = ? AND source_id = ?"
-        params = (source, source_id)
-        _LOGGER.debug("DB query: %s | params: %s", sql.strip(), str(params)[:200])
-        row = await self._db.fetchone(sql, params)
-        found = row is not None
-        _LOGGER.debug(
-            "DB fetchone: source=%s source_id=%s found=%s", source, source_id, found
+        row = await self._db.fetchone(
+            "SELECT * FROM queue_items WHERE source = ? AND source_id = ?",
+            (source, source_id),
         )
         return self._row_to_item(row) if row else None
 

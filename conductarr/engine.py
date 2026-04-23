@@ -1,274 +1,52 @@
-"""Central coordinator: owns the monitor and dispatches events to handlers."""
+"""ConductarrEngine: public facade that delegates to the new Orchestrator.
+
+The legacy monitor, queue manager, and upgrade scheduler modules are kept
+intact but are no longer wired into the main loop.  They can be removed in
+a future cleanup pass.
+"""
 
 from __future__ import annotations
 
 import logging
 
-from conductarr.clients.radarr import RadarrClient
-from conductarr.clients.sabnzbd import SABnzbdClient
-from conductarr.clients.sonarr import SonarrClient
-from conductarr.config import AnyDatabaseConfig, ConductarrConfig, SQLiteDatabaseConfig
-from conductarr.db.database import Database
+from conductarr.config import AnyDatabaseConfig, ConductarrConfig
 from conductarr.db.repository import QueueRepository
-from conductarr.events import (
-    ConductarrEvent,
-    JobAddedEvent,
-    JobPriorityChangedEvent,
-    JobRemovedEvent,
-    JobStatusChangedEvent,
-    QueuePausedEvent,
-    QueueResumedEvent,
-    QueueSnapshotEvent,
-    RadarrQueueItemAddedEvent,
-    RadarrQueueItemRemovedEvent,
-    RadarrQueueSnapshotEvent,
-    ServiceUnavailableEvent,
-    SonarrQueueItemAddedEvent,
-    SonarrQueueItemRemovedEvent,
-    SonarrQueueSnapshotEvent,
-)
-from conductarr.monitor import SabnzbdMonitor
-from conductarr.queue.manager import QueueManager
-from conductarr.queue.models import VirtualQueue
-from conductarr.upgrade.scheduler import UpgradeScheduler
+from conductarr.orchestrator import Orchestrator
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class ConductarrEngine:
-    """Central coordinator.
+    """Public facade over the new :class:`~conductarr.orchestrator.Orchestrator`.
 
-    Owns the monitor and dispatches events to handlers.
-    Designed to be extended with queue managers and other handlers later.
+    Preserves the external API used by ``__main__.py`` and integration tests
+    while delegating all logic to the orchestrator.
     """
 
     def __init__(
-        self, config: ConductarrConfig, database_config: AnyDatabaseConfig | None = None
+        self,
+        config: ConductarrConfig,
+        database_config: AnyDatabaseConfig | None = None,
     ) -> None:
-        self._config = config
-        self._client = SABnzbdClient(
-            url=config.sabnzbd.url,
-            api_key=config.sabnzbd.api_key,
-        )
-        self._radarr_client = RadarrClient(
-            url=config.radarr.url,
-            api_key=config.radarr.api_key,
-        )
-        self._sonarr_client = SonarrClient(
-            url=config.sonarr.url,
-            api_key=config.sonarr.api_key,
-        )
-        self._monitor = SabnzbdMonitor(
-            client=self._client,
-            radarr_client=self._radarr_client,
-            sonarr_client=self._sonarr_client,
-            poll_interval=config.poll_interval,
-            on_event=self._handle_event,
-            on_cycle_complete=self._on_cycle_complete,
-        )
-
-        # Database and queue management
-        db_config = database_config or SQLiteDatabaseConfig()
-        self._db = Database(db_config)
-        self._repo = QueueRepository(self._db)
-        virtual_queues = [
-            VirtualQueue(
-                name=q.name,
-                priority=q.priority,
-                enabled=q.enabled,
-                fallback=q.fallback,
-                matchers=[{"type": m.type, "tags": m.tags} for m in q.matchers],
-            )
-            for q in config.queues
-        ]
-        self._queue_manager = QueueManager(
-            self._repo,
-            virtual_queues,
-            radarr_client=self._radarr_client,
-            sonarr_client=self._sonarr_client,
-            sabnzbd_client=self._client,
-        )
-
-        # Upgrade scheduler — only instantiated when at least one upgrade queue exists
-        upgrade_queue_configs = [
-            q for q in config.queues if q.upgrade is not None and q.upgrade.enabled
-        ]
-        self._upgrade_scheduler: UpgradeScheduler | None = (
-            UpgradeScheduler(
-                self._repo,
-                upgrade_queue_configs,
-                radarr_client=self._radarr_client,
-                sonarr_client=self._sonarr_client,
-            )
-            if upgrade_queue_configs
-            else None
-        )
-        self._upgrade_queue_names: frozenset[str] = frozenset(
-            q.name for q in upgrade_queue_configs
-        )
-        # Previous snapshot state for change-detection logging
-        self._prev_sab_slots: int | None = None
-        self._prev_sab_paused: bool | None = None
-        self._prev_radarr_count: int | None = None
-        self._prev_sonarr_count: int | None = None
+        self._orchestrator = Orchestrator(config, database_config)
 
     async def connect(self) -> None:
-        """Connect the database and HTTP client without starting the watch loop."""
-        await self._db.connect()
-        await self._client.__aenter__()
+        """Open DB and HTTP connections without starting the poll loop."""
+        await self._orchestrator.connect()
 
     async def start(self) -> None:
-        """Start the monitor and begin processing events."""
-        await self.connect()
-        await self._monitor.start()
-        if self._upgrade_scheduler is not None:
-            await self._upgrade_scheduler.start()
-        _LOGGER.info("Conductarr engine started")
+        """Connect, seed, and start the poll loop."""
+        await self._orchestrator.start()
 
     async def stop(self) -> None:
-        """Stop the monitor and close the client session."""
-        if self._upgrade_scheduler is not None:
-            await self._upgrade_scheduler.stop()
-        await self._monitor.stop()
-        await self._client.__aexit__(None, None, None)
-        await self._db.disconnect()
+        """Stop the poll loop and close all connections."""
+        await self._orchestrator.stop()
 
     async def poll_once(self) -> None:
-        """Run exactly one poll cycle (for integration tests)."""
-        await self._monitor._poll()
+        """Execute exactly one poll cycle (for integration tests)."""
+        await self._orchestrator.poll_once()
 
     @property
     def repo(self) -> QueueRepository:
         """Expose the repository for test introspection."""
-        return self._repo
-
-    async def _on_cycle_complete(self) -> None:
-        """Called by the monitor after every successful poll cycle."""
-        sab = self._monitor.last_sab_queue
-        radarr = self._monitor.last_radarr_queue
-        sonarr = self._monitor.last_sonarr_queue
-        if sab is not None and radarr is not None and sonarr is not None:
-            try:
-                completed_queues = await self._queue_manager.reconcile(
-                    sab, radarr, sonarr
-                )
-            except Exception:
-                _LOGGER.exception("Error during queue reconcile")
-                return
-            if self._upgrade_scheduler is not None:
-                try:
-                    for vq in completed_queues:
-                        if vq in self._upgrade_queue_names:
-                            await self._upgrade_scheduler.on_job_completed(vq)
-                    await self._upgrade_scheduler.on_reconcile_complete()
-                except Exception:
-                    _LOGGER.exception("Error in upgrade scheduler post-reconcile")
-
-    async def _handle_event(self, event: ConductarrEvent) -> None:
-        """Dispatch an event to the appropriate handler."""
-        match event:
-            case QueueSnapshotEvent():
-                _slots = event.queue.noofslots
-                _paused = event.queue.paused
-                _changed = (
-                    _slots != self._prev_sab_slots or _paused != self._prev_sab_paused
-                )
-                (_LOGGER.info if _changed else _LOGGER.debug)(
-                    "Event: %s  slots=%d  paused=%s",
-                    type(event).__name__,
-                    _slots,
-                    _paused,
-                )
-                self._prev_sab_slots = _slots
-                self._prev_sab_paused = _paused
-            case JobAddedEvent():
-                _LOGGER.info(
-                    "Event: %s  nzo_id=%s  filename=%s",
-                    type(event).__name__,
-                    event.slot.nzo_id,
-                    event.slot.filename,
-                )
-                await self._queue_manager.on_job_added(event.slot.nzo_id, event.slot)
-            case JobRemovedEvent():
-                _LOGGER.info(
-                    "Event: %s  nzo_id=%s  filename=%s",
-                    type(event).__name__,
-                    event.nzo_id,
-                    event.filename,
-                )
-                await self._queue_manager.on_job_removed(event.nzo_id)
-            case JobStatusChangedEvent():
-                _LOGGER.info(
-                    "Event: %s  nzo_id=%s  %s → %s",
-                    type(event).__name__,
-                    event.nzo_id,
-                    event.old_status,
-                    event.new_status,
-                )
-            case JobPriorityChangedEvent():
-                _LOGGER.info(
-                    "Event: %s  nzo_id=%s  %s → %s",
-                    type(event).__name__,
-                    event.nzo_id,
-                    event.old_priority,
-                    event.new_priority,
-                )
-            case QueuePausedEvent():
-                _LOGGER.info("Event: %s", type(event).__name__)
-            case QueueResumedEvent():
-                _LOGGER.info("Event: %s", type(event).__name__)
-            case RadarrQueueSnapshotEvent():
-                _count = len(event.items)
-                _changed = _count != self._prev_radarr_count
-                (_LOGGER.info if _changed else _LOGGER.debug)(
-                    "Event: %s  items=%d",
-                    type(event).__name__,
-                    _count,
-                )
-                self._prev_radarr_count = _count
-            case RadarrQueueItemAddedEvent():
-                _LOGGER.info(
-                    "Event: %s  download_id=%s  title=%s",
-                    type(event).__name__,
-                    event.item.download_id,
-                    event.item.title,
-                )
-            case RadarrQueueItemRemovedEvent():
-                _LOGGER.info(
-                    "Event: %s  download_id=%s  title=%s",
-                    type(event).__name__,
-                    event.download_id,
-                    event.title,
-                )
-            case SonarrQueueSnapshotEvent():
-                _count = len(event.items)
-                _changed = _count != self._prev_sonarr_count
-                (_LOGGER.info if _changed else _LOGGER.debug)(
-                    "Event: %s  items=%d",
-                    type(event).__name__,
-                    _count,
-                )
-                self._prev_sonarr_count = _count
-            case SonarrQueueItemAddedEvent():
-                _LOGGER.info(
-                    "Event: %s  download_id=%s  title=%s",
-                    type(event).__name__,
-                    event.item.download_id,
-                    event.item.title,
-                )
-            case SonarrQueueItemRemovedEvent():
-                _LOGGER.info(
-                    "Event: %s  download_id=%s  title=%s",
-                    type(event).__name__,
-                    event.download_id,
-                    event.title,
-                )
-            case ServiceUnavailableEvent():
-                _LOGGER.info(
-                    "Event: %s  service=%s  error=%s",
-                    type(event).__name__,
-                    event.service,
-                    event.error,
-                )
-            case _:
-                _LOGGER.info("Event: %s", type(event).__name__)
+        return self._orchestrator.repo

@@ -122,7 +122,6 @@ class SonarrClient:
 
     async def get_queue(self) -> list[SonarrQueueItem]:
         """Return all current Sonarr queue items."""
-        _LOGGER.debug("Sonarr get_queue: fetching up to 1000 records")
         try:
             data = await self._get_api().queue.get(page_size=1000)
         except PyarrUnauthorizedError as exc:
@@ -144,7 +143,6 @@ class SonarrClient:
             )
             for item in data.get("records", [])
         ]
-        _LOGGER.debug("Sonarr get_queue: got %d records", len(records))
         return records
 
     # ------------------------------------------------------------------
@@ -193,12 +191,6 @@ class SonarrClient:
         has_file: bool | None = None,
     ) -> list[SonarrEpisode]:
         """Return episodes for a series, optionally filtered."""
-        _LOGGER.debug(
-            "Sonarr get_episodes: series_id=%d (monitored=%s, has_file=%s)",
-            series_id,
-            monitored,
-            has_file,
-        )
         try:
             raw = cast(
                 list[dict[str, Any]],
@@ -216,11 +208,6 @@ class SonarrClient:
             episodes = [e for e in episodes if e.monitored is monitored]
         if has_file is not None:
             episodes = [e for e in episodes if e.has_file is has_file]
-        _LOGGER.debug(
-            "Sonarr get_episodes: series_id=%d got %d episode(s)",
-            series_id,
-            len(episodes),
-        )
         return episodes
 
     async def get_episode(self, episode_id: int) -> SonarrEpisode | None:

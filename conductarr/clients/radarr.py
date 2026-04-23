@@ -111,7 +111,6 @@ class RadarrClient:
 
     async def get_queue(self) -> list[RadarrQueueItem]:
         """Return all current Radarr queue items."""
-        _LOGGER.debug("Radarr get_queue: fetching up to 1000 records")
         try:
             data = await self._get_api().queue.get(page_size=1000)
         except PyarrUnauthorizedError as exc:
@@ -132,7 +131,6 @@ class RadarrClient:
             )
             for item in data.get("records", [])
         ]
-        _LOGGER.debug("Radarr get_queue: got %d records", len(records))
         return records
 
     # ------------------------------------------------------------------
