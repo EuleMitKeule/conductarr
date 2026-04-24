@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 
 from conductarr.config import (
     ConductarrConfig,
+    Config,
+    GeneralConfig,
+    LoggingConfig,
     MatcherConfig,
     MemoryDatabaseConfig,
     RadarrConfig,
@@ -22,11 +26,21 @@ from conductarr.config import (
     VirtualQueueConfig,
 )
 from conductarr.db.repository import QueueRepository
-from conductarr.engine import ConductarrEngine
+from conductarr.orchestrator import Orchestrator
 from tests.mocks.control_client import (
     RadarrControlClient,
     SABnzbdControlClient,
 )
+
+
+def _make_infra_config() -> Config:
+    return Config(
+        config_dir=Path("."),
+        config_file="conductarr.yml",
+        general=GeneralConfig(),
+        logging=LoggingConfig(),
+        database=MemoryDatabaseConfig(),
+    )
 
 
 def _make_config() -> ConductarrConfig:
@@ -64,16 +78,16 @@ def _make_config() -> ConductarrConfig:
 
 
 @pytest_asyncio.fixture
-async def engine() -> AsyncGenerator[ConductarrEngine, None]:
-    eng = ConductarrEngine(_make_config(), database_config=MemoryDatabaseConfig())
+async def orchestrator() -> AsyncGenerator[Orchestrator, None]:
+    eng = Orchestrator(_make_infra_config(), _make_config())
     await eng.connect()
     yield eng
     await eng.stop()
 
 
 @pytest.fixture
-def repo(engine: ConductarrEngine) -> QueueRepository:
-    return engine.repo
+def repo(orchestrator: Orchestrator) -> QueueRepository:
+    return orchestrator.repo
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +110,7 @@ def _jobs_by_index(state: dict[str, object]) -> dict[int, dict[str, object]]:
 async def test_higher_priority_job_moves_to_front(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine: ConductarrEngine,
+    orchestrator: Orchestrator,
 ) -> None:
     """A job assigned to a higher-priority virtual queue is moved to slot 0."""
     # Add two movies: low-priority one is released first (index 0).
@@ -121,7 +135,7 @@ async def test_higher_priority_job_moves_to_front(
     await radarr_control.release_movie(tmdb_id=1001, nzo_id=nzo_low)
     await radarr_control.release_movie(tmdb_id=1002, nzo_id=nzo_high)
 
-    await engine.poll_once()
+    await orchestrator.poll_once()
 
     state = await sabnzbd_control.get_state()
     by_index = _jobs_by_index(state)
@@ -133,7 +147,7 @@ async def test_higher_priority_job_moves_to_front(
 async def test_same_priority_order_stays_stable(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine: ConductarrEngine,
+    orchestrator: Orchestrator,
 ) -> None:
     """Jobs in the same virtual queue keep their original relative order."""
     await radarr_control.add_movie(
@@ -149,7 +163,7 @@ async def test_same_priority_order_stays_stable(
     await radarr_control.release_movie(tmdb_id=2001, nzo_id=nzo_a)
     await radarr_control.release_movie(tmdb_id=2002, nzo_id=nzo_b)
 
-    await engine.poll_once()
+    await orchestrator.poll_once()
 
     state = await sabnzbd_control.get_state()
     by_index = _jobs_by_index(state)
@@ -162,7 +176,7 @@ async def test_same_priority_order_stays_stable(
 async def test_unknown_jobs_go_to_back(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine: ConductarrEngine,
+    orchestrator: Orchestrator,
 ) -> None:
     """A SABnzbd job with no Radarr/Sonarr match is pushed behind mapped jobs."""
     await radarr_control.add_movie(title="Known Film", tmdb_id=3001, tags=["request"])
@@ -175,7 +189,7 @@ async def test_unknown_jobs_go_to_back(
 
     await radarr_control.release_movie(tmdb_id=3001, nzo_id=nzo_known)
 
-    await engine.poll_once()
+    await orchestrator.poll_once()
 
     state = await sabnzbd_control.get_state()
     by_index = _jobs_by_index(state)
@@ -187,7 +201,7 @@ async def test_unknown_jobs_go_to_back(
 async def test_reorder_is_idempotent(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine: ConductarrEngine,
+    orchestrator: Orchestrator,
 ) -> None:
     """switch() is not called again when the queue is already in the correct order."""
     await radarr_control.add_movie(
@@ -208,14 +222,14 @@ async def test_reorder_is_idempotent(
     await radarr_control.release_movie(tmdb_id=4002, nzo_id=nzo_high)
 
     # First poll: queue is out of order → switch() must be called at least once.
-    await engine.poll_once()
+    await orchestrator.poll_once()
     state_after_first = await sabnzbd_control.get_state()
     assert state_after_first["switch_call_count"] >= 1, (
         "Expected switch() on first poll"
     )
 
     # Second poll: queue is already in the correct order → no additional switch() calls.
-    await engine.poll_once()
+    await orchestrator.poll_once()
     state_after_second = await sabnzbd_control.get_state()
     assert (
         state_after_second["switch_call_count"]
@@ -226,7 +240,7 @@ async def test_reorder_is_idempotent(
 async def test_three_queues_correct_order(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine: ConductarrEngine,
+    orchestrator: Orchestrator,
 ) -> None:
     """Three jobs spanning two queues plus one unknown sort into the right order."""
     await radarr_control.add_movie(
@@ -248,7 +262,7 @@ async def test_three_queues_correct_order(
     await radarr_control.release_movie(tmdb_id=5001, nzo_id=nzo_high)
     await radarr_control.release_movie(tmdb_id=5002, nzo_id=nzo_mid)
 
-    await engine.poll_once()
+    await orchestrator.poll_once()
 
     state = await sabnzbd_control.get_state()
     by_index = _jobs_by_index(state)
@@ -261,7 +275,7 @@ async def test_three_queues_correct_order(
 async def test_only_slot0_downloading_after_reorder(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine: ConductarrEngine,
+    orchestrator: Orchestrator,
 ) -> None:
     """After reconcile only slot 0 is active; all other slots are individually paused."""
     await radarr_control.add_movie(title="Active A", tmdb_id=6001, tags=["request"])
@@ -276,7 +290,7 @@ async def test_only_slot0_downloading_after_reorder(
     await radarr_control.release_movie(tmdb_id=6002, nzo_id=nzo_b)
     await radarr_control.release_movie(tmdb_id=6003, nzo_id=nzo_c)
 
-    await engine.poll_once()
+    await orchestrator.poll_once()
 
     state = await sabnzbd_control.get_state()
     by_index = _jobs_by_index(state)
@@ -289,7 +303,7 @@ async def test_only_slot0_downloading_after_reorder(
 async def test_next_job_starts_when_top_finishes(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine: ConductarrEngine,
+    orchestrator: Orchestrator,
 ) -> None:
     """When the top job finishes, the new slot 0 is automatically resumed."""
     await radarr_control.add_movie(
@@ -308,7 +322,7 @@ async def test_next_job_starts_when_top_finishes(
     await radarr_control.release_movie(tmdb_id=7002, nzo_id=nzo_low)
 
     # First poll: nzo_high → slot 0 (active), nzo_low → slot 1 (paused).
-    await engine.poll_once()
+    await orchestrator.poll_once()
 
     state_mid = await sabnzbd_control.get_state()
     by_index = _jobs_by_index(state_mid)
@@ -322,7 +336,7 @@ async def test_next_job_starts_when_top_finishes(
     await radarr_control.finish_movie(tmdb_id=7001)
 
     # Second poll: nzo_low is now the only slot → must be resumed automatically.
-    await engine.poll_once()
+    await orchestrator.poll_once()
 
     state_final = await sabnzbd_control.get_state()
     assert nzo_high not in state_final["jobs"], "Finished job must be gone"

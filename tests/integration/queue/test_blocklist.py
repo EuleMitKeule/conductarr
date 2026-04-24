@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -18,6 +19,9 @@ import pytest_asyncio
 from conductarr.config import (
     AcceptConditionConfig,
     ConductarrConfig,
+    Config,
+    GeneralConfig,
+    LoggingConfig,
     MatcherConfig,
     MemoryDatabaseConfig,
     RadarrConfig,
@@ -26,7 +30,7 @@ from conductarr.config import (
     UpgradeConfig,
     VirtualQueueConfig,
 )
-from conductarr.engine import ConductarrEngine
+from conductarr.orchestrator import Orchestrator
 from conductarr.queue.models import QueueItem
 from tests.mocks.control_client import (
     RadarrControlClient,
@@ -39,6 +43,16 @@ pytestmark = pytest.mark.asyncio
 # ---------------------------------------------------------------------------
 # Config factory
 # ---------------------------------------------------------------------------
+
+
+def _make_infra_config() -> Config:
+    return Config(
+        config_dir=Path("."),
+        config_file="conductarr.yml",
+        general=GeneralConfig(),
+        logging=LoggingConfig(),
+        database=MemoryDatabaseConfig(),
+    )
 
 
 def _make_config() -> ConductarrConfig:
@@ -80,8 +94,8 @@ def _make_config() -> ConductarrConfig:
 
 
 @pytest_asyncio.fixture
-async def engine_blocklist() -> AsyncGenerator[ConductarrEngine, None]:
-    eng = ConductarrEngine(_make_config(), database_config=MemoryDatabaseConfig())
+async def engine_blocklist() -> AsyncGenerator[Orchestrator, None]:
+    eng = Orchestrator(_make_infra_config(), _make_config())
     await eng.connect()
     yield eng
     await eng.stop()
@@ -104,7 +118,7 @@ async def reset_mocks(
 
 async def test_blocklisted_release_is_skipped_clean_release_grabbed(
     radarr_control: RadarrControlClient,
-    engine_blocklist: ConductarrEngine,
+    engine_blocklist: Orchestrator,
 ) -> None:
     """The blocklisted release is filtered out; the clean release is grabbed.
 
@@ -170,7 +184,7 @@ async def test_blocklisted_release_is_skipped_clean_release_grabbed(
 
 async def test_all_releases_blocklisted_no_grab_occurs(
     radarr_control: RadarrControlClient,
-    engine_blocklist: ConductarrEngine,
+    engine_blocklist: Orchestrator,
 ) -> None:
     """When all matching releases are blocklisted, no grab occurs.
 
@@ -223,7 +237,7 @@ async def test_all_releases_blocklisted_no_grab_occurs(
 
 async def test_empty_blocklist_does_not_filter_releases(
     radarr_control: RadarrControlClient,
-    engine_blocklist: ConductarrEngine,
+    engine_blocklist: Orchestrator,
 ) -> None:
     """With an empty blocklist, the best release is grabbed normally."""
     movie = await radarr_control.add_movie(

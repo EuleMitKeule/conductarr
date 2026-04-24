@@ -15,12 +15,16 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 
 from conductarr.config import (
     ConductarrConfig,
+    Config,
+    GeneralConfig,
+    LoggingConfig,
     MatcherConfig,
     MemoryDatabaseConfig,
     RadarrConfig,
@@ -29,11 +33,21 @@ from conductarr.config import (
     VirtualQueueConfig,
 )
 from conductarr.db.repository import QueueRepository
-from conductarr.engine import ConductarrEngine
+from conductarr.orchestrator import Orchestrator
 from tests.mocks.control_client import (
     RadarrControlClient,
     SABnzbdControlClient,
 )
+
+
+def _make_infra_config() -> Config:
+    return Config(
+        config_dir=Path("."),
+        config_file="conductarr.yml",
+        general=GeneralConfig(),
+        logging=LoggingConfig(),
+        database=MemoryDatabaseConfig(),
+    )
 
 
 def _make_config() -> ConductarrConfig:
@@ -64,16 +78,16 @@ def _make_config() -> ConductarrConfig:
 
 
 @pytest_asyncio.fixture
-async def engine() -> AsyncGenerator[ConductarrEngine, None]:
-    eng = ConductarrEngine(_make_config(), database_config=MemoryDatabaseConfig())
-    await eng.connect()
-    yield eng
-    await eng.stop()
+async def orchestrator() -> AsyncGenerator[Orchestrator, None]:
+    orch = Orchestrator(_make_infra_config(), _make_config())
+    await orch.connect()
+    yield orch
+    await orch.stop()
 
 
 @pytest.fixture
-def repo(engine: ConductarrEngine) -> QueueRepository:
-    return engine.repo
+def repo(orchestrator: Orchestrator) -> QueueRepository:
+    return orchestrator.repo
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -94,7 +108,7 @@ async def ensure_sabnzbd_online(
 async def test_cycle_is_fully_skipped_when_sabnzbd_offline(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine: ConductarrEngine,
+    orchestrator: Orchestrator,
     repo: QueueRepository,
 ) -> None:
     """When SABnzbd is unreachable the poll cycle does nothing at all.
@@ -114,13 +128,13 @@ async def test_cycle_is_fully_skipped_when_sabnzbd_offline(
     await radarr_control.release_movie(tmdb_id=90001, nzo_id=nzo_id)
 
     # First cycle: normal — job should be mapped.
-    await engine.poll_once()
+    await orchestrator.poll_once()
     job_map = await repo.get_job_map(nzo_id)
     assert job_map is not None, "Job must be mapped after the first normal cycle"
 
     # Take SABnzbd offline and run another cycle.
     await sabnzbd_control.go_offline()
-    await engine.poll_once()
+    await orchestrator.poll_once()
 
     # Job-map must still be intact — the cycle was skipped, not erroneously completed.
     job_map_after = await repo.get_job_map(nzo_id)
@@ -138,7 +152,7 @@ async def test_cycle_is_fully_skipped_when_sabnzbd_offline(
 async def test_completion_requires_history_not_just_disappearance(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine: ConductarrEngine,
+    orchestrator: Orchestrator,
     repo: QueueRepository,
 ) -> None:
     """A job that disappears from the SABnzbd queue is NOT marked complete until
@@ -157,7 +171,7 @@ async def test_completion_requires_history_not_just_disappearance(
     )
     await radarr_control.release_movie(tmdb_id=90002, nzo_id=nzo_id)
 
-    await engine.poll_once()
+    await orchestrator.poll_once()
     assert await repo.get_job_map(nzo_id) is not None
 
     # Simulate post-processing transition: job vanishes from queue but has NOT
@@ -165,7 +179,7 @@ async def test_completion_requires_history_not_just_disappearance(
     await sabnzbd_control.cancel_job(nzo_id)
     await radarr_control.finish_movie(tmdb_id=90002)
 
-    await engine.poll_once()
+    await orchestrator.poll_once()
 
     # Job map must still exist and item must NOT be completed yet.
     job_map_after_disappear = await repo.get_job_map(nzo_id)
@@ -187,7 +201,7 @@ async def test_completion_requires_history_not_just_disappearance(
     )
     await sabnzbd_control.finish_job(nzo_id)
 
-    await engine.poll_once()
+    await orchestrator.poll_once()
 
     job_map_after_history = await repo.get_job_map(nzo_id)
     assert job_map_after_history is None, (
@@ -203,7 +217,7 @@ async def test_completion_requires_history_not_just_disappearance(
 async def test_cancelled_job_never_marked_completed(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine: ConductarrEngine,
+    orchestrator: Orchestrator,
     repo: QueueRepository,
 ) -> None:
     """A job removed via cancel (no history entry) is never marked as completed."""
@@ -218,7 +232,7 @@ async def test_cancelled_job_never_marked_completed(
     )
     await radarr_control.release_movie(tmdb_id=90003, nzo_id=nzo_id)
 
-    await engine.poll_once()
+    await orchestrator.poll_once()
     assert await repo.get_job_map(nzo_id) is not None
 
     # Cancel the download — no history entry created.
@@ -226,7 +240,7 @@ async def test_cancelled_job_never_marked_completed(
 
     # Multiple cycles: item should never flip to completed.
     for _ in range(3):
-        await engine.poll_once()
+        await orchestrator.poll_once()
 
     item = await repo.get_item("radarr", str(movie["id"]))
     assert item is not None

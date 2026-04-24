@@ -19,13 +19,13 @@ queues:
     priority: 100
     matchers:
       - type: tags
-        tags: ["request", "overseerr"]
+        tags: [ "request", "overseerr" ]
 
   - name: german_upgrade
     priority: 50
     matchers:
       - type: tags
-        tags: ["upgrade-de"]
+        tags: [ "upgrade-de" ]
     upgrade:
       enabled: true
       sources:
@@ -34,6 +34,7 @@ queues:
       max_active: 2
       daily_scan_interval: 86400
       retry_after_days: 7
+      no_release_retry_days: 1
       search_interval: 30.0
       accept_conditions:
         - type: custom_format
@@ -44,4 +45,4 @@ queues:
     enabled: false
     matchers:
       - type: tags
-        tags: ["kometa"]
+        tags: [ "kometa" ]

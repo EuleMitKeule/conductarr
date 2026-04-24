@@ -101,6 +101,7 @@ class QueueRepository:
         virtual_queue: str,
         source: str,
         retry_after_days: int,
+        no_release_retry_days: int = 1,
     ) -> list[QueueItem]:
         """Return items eligible for an upgrade search.
 
@@ -109,6 +110,8 @@ class QueueRepository:
         - ``upgrade_grabbed`` is not ``true`` (or absent).
         - ``upgrade_last_searched_at`` is NULL **or** older than
           ``now - retry_after_days``.
+        - ``upgrade_no_release_at`` is NULL **or** older than
+          ``now - no_release_retry_days``.
         Items are ordered numerically by *source_id* (ascending).
         """
         sql = """
@@ -123,10 +126,16 @@ class QueueRepository:
                 OR datetime(json_extract(metadata, '$.upgrade_last_searched_at'))
                    < datetime('now', '-' || ? || ' days')
               )
+              AND (
+                json_extract(metadata, '$.upgrade_no_release_at') IS NULL
+                OR datetime(json_extract(metadata, '$.upgrade_no_release_at'))
+                   < datetime('now', '-' || ? || ' days')
+              )
             ORDER BY CAST(source_id AS INTEGER) ASC
             """
         rows = await self._db.fetchall(
-            sql, (virtual_queue, source, str(retry_after_days))
+            sql,
+            (virtual_queue, source, str(retry_after_days), str(no_release_retry_days)),
         )
         _LOGGER.debug(
             "upgrade_candidates '%s'/%s: %d eligible",
@@ -165,6 +174,30 @@ class QueueRepository:
             (virtual_queue,),
         )
         return row[0] if row else 0
+
+    async def get_grabbed_items_without_jobmap(
+        self, virtual_queue: str, grabbed_before: datetime
+    ) -> list[QueueItem]:
+        """Return grabbed items with no job_map whose grab is older than *grabbed_before*.
+
+        Used to detect stale grabs — downloads that immediately failed in SABnzbd
+        before the orchestrator could observe them in the active queue.
+        """
+        rows = await self._db.fetchall(
+            """
+            SELECT qi.* FROM queue_items qi
+            WHERE qi.virtual_queue = ?
+              AND json_extract(qi.metadata, '$.upgrade_grabbed') IS 1
+              AND qi.id NOT IN (
+                  SELECT queue_item_id FROM sabnzbd_job_map
+                  WHERE queue_item_id IS NOT NULL
+              )
+              AND json_extract(qi.metadata, '$.upgrade_grabbed_at') IS NOT NULL
+              AND datetime(json_extract(qi.metadata, '$.upgrade_grabbed_at')) < ?
+            """,
+            (virtual_queue, grabbed_before.isoformat()),
+        )
+        return [self._row_to_item(r) for r in rows]
 
     async def upsert_job_map(
         self, nzo_id: str, queue_item_id: int, virtual_queue: str

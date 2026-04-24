@@ -168,13 +168,6 @@ class SABnzbdClient:
             **params,
         }
 
-        if not silent:
-            _LOGGER.debug(
-                "SABnzbd GET %s params=%s",
-                endpoint,
-                {k: v for k, v in all_params.items() if k != "apikey"},
-            )
-
         owns_session = self._session is None
         session: aiohttp.ClientSession = (
             self._session if self._session is not None else aiohttp.ClientSession()

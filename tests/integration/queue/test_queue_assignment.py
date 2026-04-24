@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import pytest_asyncio
 
 from conductarr.config import (
     AcceptConditionConfig,
     ConductarrConfig,
+    Config,
+    GeneralConfig,
+    LoggingConfig,
     MatcherConfig,
     MemoryDatabaseConfig,
     RadarrConfig,
@@ -24,7 +28,7 @@ from conductarr.config import (
     UpgradeConfig,
     VirtualQueueConfig,
 )
-from conductarr.engine import ConductarrEngine
+from conductarr.orchestrator import Orchestrator
 from tests.mocks.control_client import (
     RadarrControlClient,
     SABnzbdControlClient,
@@ -33,6 +37,16 @@ from tests.mocks.control_client import (
 # ---------------------------------------------------------------------------
 # Config factories
 # ---------------------------------------------------------------------------
+
+
+def _make_infra_config() -> Config:
+    return Config(
+        config_dir=Path("."),
+        config_file="conductarr.yml",
+        general=GeneralConfig(),
+        logging=LoggingConfig(),
+        database=MemoryDatabaseConfig(),
+    )
 
 
 def _base_urls() -> tuple[str, str, str]:
@@ -134,30 +148,24 @@ def _make_config_external_download() -> ConductarrConfig:
 
 
 @pytest_asyncio.fixture
-async def engine_has_no_file() -> AsyncGenerator[ConductarrEngine, None]:
-    eng = ConductarrEngine(
-        _make_config_with_has_no_file(), database_config=MemoryDatabaseConfig()
-    )
+async def orchestrator_has_no_file() -> AsyncGenerator[Orchestrator, None]:
+    eng = Orchestrator(_make_infra_config(), _make_config_with_has_no_file())
     await eng.connect()
     yield eng
     await eng.stop()
 
 
 @pytest_asyncio.fixture
-async def engine_upgrade_skip() -> AsyncGenerator[ConductarrEngine, None]:
-    eng = ConductarrEngine(
-        _make_config_with_upgrade_auto_skip(), database_config=MemoryDatabaseConfig()
-    )
+async def orchestrator_upgrade_skip() -> AsyncGenerator[Orchestrator, None]:
+    eng = Orchestrator(_make_infra_config(), _make_config_with_upgrade_auto_skip())
     await eng.connect()
     yield eng
     await eng.stop()
 
 
 @pytest_asyncio.fixture
-async def engine_external() -> AsyncGenerator[ConductarrEngine, None]:
-    eng = ConductarrEngine(
-        _make_config_external_download(), database_config=MemoryDatabaseConfig()
-    )
+async def orchestrator_external() -> AsyncGenerator[Orchestrator, None]:
+    eng = Orchestrator(_make_infra_config(), _make_config_external_download())
     await eng.connect()
     yield eng
     await eng.stop()
@@ -171,7 +179,7 @@ async def engine_external() -> AsyncGenerator[ConductarrEngine, None]:
 async def test_has_no_file_matcher_routes_movie_without_file(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine_has_no_file: ConductarrEngine,
+    orchestrator_has_no_file: Orchestrator,
 ) -> None:
     """Movie with no existing file is assigned to the 'first_download' queue."""
     movie = await radarr_control.add_movie(
@@ -185,13 +193,13 @@ async def test_has_no_file_matcher_routes_movie_without_file(
     )
     await radarr_control.release_movie(tmdb_id=157336, nzo_id=nzo_id)
 
-    await engine_has_no_file.poll_once()
+    await orchestrator_has_no_file.poll_once()
 
-    job_map = await engine_has_no_file.repo.get_job_map(nzo_id)
+    job_map = await orchestrator_has_no_file.repo.get_job_map(nzo_id)
     assert job_map is not None
     assert job_map["virtual_queue"] == "first_download"
 
-    item = await engine_has_no_file.repo.get_item("radarr", str(movie["id"]))
+    item = await orchestrator_has_no_file.repo.get_item("radarr", str(movie["id"]))
     assert item is not None
     assert item.virtual_queue == "first_download"
 
@@ -199,7 +207,7 @@ async def test_has_no_file_matcher_routes_movie_without_file(
 async def test_has_no_file_matcher_does_not_match_when_file_exists(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine_has_no_file: ConductarrEngine,
+    orchestrator_has_no_file: Orchestrator,
 ) -> None:
     """Movie that already has a file does not match has_no_file → goes to fallback."""
     movie = await radarr_control.add_movie(
@@ -214,13 +222,13 @@ async def test_has_no_file_matcher_does_not_match_when_file_exists(
     )
     await radarr_control.release_movie(tmdb_id=49047, nzo_id=nzo_id)
 
-    await engine_has_no_file.poll_once()
+    await orchestrator_has_no_file.poll_once()
 
-    job_map = await engine_has_no_file.repo.get_job_map(nzo_id)
+    job_map = await orchestrator_has_no_file.repo.get_job_map(nzo_id)
     assert job_map is not None
     assert job_map["virtual_queue"] == "fallback"
 
-    item = await engine_has_no_file.repo.get_item("radarr", str(movie["id"]))
+    item = await orchestrator_has_no_file.repo.get_item("radarr", str(movie["id"]))
     assert item is not None
     assert item.virtual_queue == "fallback"
 
@@ -233,7 +241,7 @@ async def test_has_no_file_matcher_does_not_match_when_file_exists(
 async def test_upgrade_queue_skipped_when_conditions_already_satisfied(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine_upgrade_skip: ConductarrEngine,
+    orchestrator_upgrade_skip: Orchestrator,
 ) -> None:
     """Movie already having HDR is NOT routed to the upgrade queue.
 
@@ -255,14 +263,14 @@ async def test_upgrade_queue_skipped_when_conditions_already_satisfied(
     )
     await radarr_control.release_movie(tmdb_id=438631, nzo_id=nzo_id)
 
-    await engine_upgrade_skip.poll_once()
+    await orchestrator_upgrade_skip.poll_once()
 
-    job_map = await engine_upgrade_skip.repo.get_job_map(nzo_id)
+    job_map = await orchestrator_upgrade_skip.repo.get_job_map(nzo_id)
     assert job_map is not None
     # Must NOT be in hdr_upgrade — conditions already satisfied
     assert job_map["virtual_queue"] == "fallback"
 
-    item = await engine_upgrade_skip.repo.get_item("radarr", str(movie["id"]))
+    item = await orchestrator_upgrade_skip.repo.get_item("radarr", str(movie["id"]))
     assert item is not None
     assert item.virtual_queue == "fallback"
 
@@ -270,7 +278,7 @@ async def test_upgrade_queue_skipped_when_conditions_already_satisfied(
 async def test_upgrade_queue_skipped_when_no_file(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine_upgrade_skip: ConductarrEngine,
+    orchestrator_upgrade_skip: Orchestrator,
 ) -> None:
     """Movie with no file is NOT an upgrade candidate → goes to fallback."""
     movie = await radarr_control.add_movie(
@@ -285,13 +293,13 @@ async def test_upgrade_queue_skipped_when_no_file(
     )
     await radarr_control.release_movie(tmdb_id=577922, nzo_id=nzo_id)
 
-    await engine_upgrade_skip.poll_once()
+    await orchestrator_upgrade_skip.poll_once()
 
-    job_map = await engine_upgrade_skip.repo.get_job_map(nzo_id)
+    job_map = await orchestrator_upgrade_skip.repo.get_job_map(nzo_id)
     assert job_map is not None
     assert job_map["virtual_queue"] == "fallback"
 
-    item = await engine_upgrade_skip.repo.get_item("radarr", str(movie["id"]))
+    item = await orchestrator_upgrade_skip.repo.get_item("radarr", str(movie["id"]))
     assert item is not None
     assert item.virtual_queue == "fallback"
 
@@ -299,7 +307,7 @@ async def test_upgrade_queue_skipped_when_no_file(
 async def test_upgrade_queue_assigned_when_conditions_not_satisfied(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine_upgrade_skip: ConductarrEngine,
+    orchestrator_upgrade_skip: Orchestrator,
 ) -> None:
     """Movie with a file but HDR not yet satisfied IS assigned to the upgrade queue."""
     movie = await radarr_control.add_movie(
@@ -316,13 +324,13 @@ async def test_upgrade_queue_assigned_when_conditions_not_satisfied(
     )
     await radarr_control.release_movie(tmdb_id=872585, nzo_id=nzo_id)
 
-    await engine_upgrade_skip.poll_once()
+    await orchestrator_upgrade_skip.poll_once()
 
-    job_map = await engine_upgrade_skip.repo.get_job_map(nzo_id)
+    job_map = await orchestrator_upgrade_skip.repo.get_job_map(nzo_id)
     assert job_map is not None
     assert job_map["virtual_queue"] == "hdr_upgrade"
 
-    item = await engine_upgrade_skip.repo.get_item("radarr", str(movie["id"]))
+    item = await orchestrator_upgrade_skip.repo.get_item("radarr", str(movie["id"]))
     assert item is not None
     assert item.virtual_queue == "hdr_upgrade"
 
@@ -335,7 +343,7 @@ async def test_upgrade_queue_assigned_when_conditions_not_satisfied(
 async def test_external_grab_uses_fresh_context_not_db_queue(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine_external: ConductarrEngine,
+    orchestrator_external: Orchestrator,
 ) -> None:
     """An external (non-conductarr) grab is assigned a fresh queue for ordering.
 
@@ -358,7 +366,7 @@ async def test_external_grab_uses_fresh_context_not_db_queue(
     # but no upgrade_grabbed flag (item was seeded, not yet grabbed)
     from conductarr.queue.models import QueueItem
 
-    item = await engine_external.repo.upsert_item(
+    item = await orchestrator_external.repo.upsert_item(
         QueueItem(
             source="radarr",
             source_id=str(movie_id),
@@ -383,16 +391,16 @@ async def test_external_grab_uses_fresh_context_not_db_queue(
     )
     await radarr_control.release_movie(tmdb_id=19995, nzo_id=nzo_id)
 
-    await engine_external.poll_once()
+    await orchestrator_external.poll_once()
 
     # DB virtual_queue must remain unchanged
-    db_item = await engine_external.repo.get_item("radarr", str(movie_id))
+    db_item = await orchestrator_external.repo.get_item("radarr", str(movie_id))
     assert db_item is not None
     assert db_item.virtual_queue == "hdr_upgrade"  # DB unchanged
 
     # The NZO cache entry for ordering should use the freshly resolved queue
     # (fallback, since HDR is now satisfied → upgrade queue skipped)
-    cache_entry = engine_external._orchestrator._nzo_cache.get(nzo_id)
+    cache_entry = orchestrator_external._nzo_cache_entries.get(nzo_id)
     assert cache_entry is not None
     assert cache_entry.virtual_queue == "fallback"
 
@@ -400,7 +408,7 @@ async def test_external_grab_uses_fresh_context_not_db_queue(
 async def test_conductarr_grab_uses_persisted_virtual_queue(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine_external: ConductarrEngine,
+    orchestrator_external: Orchestrator,
 ) -> None:
     """A conductarr-initiated grab is detected via upgrade_grabbed metadata.
 
@@ -424,7 +432,7 @@ async def test_conductarr_grab_uses_persisted_virtual_queue(
 
     # Simulate state after conductarr's grab loop ran: item is in DB with
     # virtual_queue=hdr_upgrade and upgrade_grabbed=True in metadata.
-    item = await engine_external.repo.upsert_item(
+    item = await orchestrator_external.repo.upsert_item(
         QueueItem(
             source="radarr",
             source_id=str(movie_id),
@@ -442,14 +450,14 @@ async def test_conductarr_grab_uses_persisted_virtual_queue(
     )
     await radarr_control.release_movie(tmdb_id=76341, nzo_id=nzo_id)
 
-    await engine_external.poll_once()
+    await orchestrator_external.poll_once()
 
     # Job map must record hdr_upgrade, not a freshly-derived queue
-    job_map = await engine_external.repo.get_job_map(nzo_id)
+    job_map = await orchestrator_external.repo.get_job_map(nzo_id)
     assert job_map is not None
     assert job_map["virtual_queue"] == "hdr_upgrade"
 
     # NZO cache entry must also reflect hdr_upgrade for correct slot counting
-    cache_entry = engine_external._orchestrator._nzo_cache.get(nzo_id)
+    cache_entry = orchestrator_external._nzo_cache_entries.get(nzo_id)
     assert cache_entry is not None
     assert cache_entry.virtual_queue == "hdr_upgrade"

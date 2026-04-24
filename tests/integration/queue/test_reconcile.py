@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncGenerator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 
 from conductarr.config import (
     ConductarrConfig,
+    Config,
+    GeneralConfig,
+    LoggingConfig,
     MatcherConfig,
     MemoryDatabaseConfig,
     RadarrConfig,
@@ -22,12 +26,22 @@ from conductarr.config import (
     VirtualQueueConfig,
 )
 from conductarr.db.repository import QueueRepository
-from conductarr.engine import ConductarrEngine
+from conductarr.orchestrator import Orchestrator
 from tests.mocks.control_client import (
     RadarrControlClient,
     SABnzbdControlClient,
     SonarrControlClient,
 )
+
+
+def _make_infra_config() -> Config:
+    return Config(
+        config_dir=Path("."),
+        config_file="conductarr.yml",
+        general=GeneralConfig(),
+        logging=LoggingConfig(),
+        database=MemoryDatabaseConfig(),
+    )
 
 
 def _make_config() -> ConductarrConfig:
@@ -65,16 +79,16 @@ def _make_config() -> ConductarrConfig:
 
 
 @pytest_asyncio.fixture
-async def engine() -> AsyncGenerator[ConductarrEngine, None]:
-    eng = ConductarrEngine(_make_config(), database_config=MemoryDatabaseConfig())
+async def orchestrator() -> AsyncGenerator[Orchestrator, None]:
+    eng = Orchestrator(_make_infra_config(), _make_config())
     await eng.connect()
     yield eng
     await eng.stop()
 
 
 @pytest.fixture
-def repo(engine: ConductarrEngine) -> QueueRepository:
-    return engine.repo
+def repo(orchestrator: Orchestrator) -> QueueRepository:
+    return orchestrator.repo
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +99,7 @@ def repo(engine: ConductarrEngine) -> QueueRepository:
 async def test_reconcile_radarr_job(
     sabnzbd_control: SABnzbdControlClient,
     radarr_control: RadarrControlClient,
-    engine: ConductarrEngine,
+    orchestrator: Orchestrator,
     repo: QueueRepository,
 ) -> None:
     """A SABnzbd job whose nzo_id matches a Radarr downloadId is mapped to the
@@ -102,7 +116,7 @@ async def test_reconcile_radarr_job(
     await radarr_control.release_movie(tmdb_id=27205, nzo_id=nzo_id)
 
     # Single poll cycle: SABnzbd slot + Radarr queue entry are correlated
-    await engine.poll_once()
+    await orchestrator.poll_once()
 
     job_map = await repo.get_job_map(nzo_id)
     assert job_map is not None, "Job should be mapped after reconcile"
@@ -116,7 +130,7 @@ async def test_reconcile_radarr_job(
     await sabnzbd_control.finish_job(nzo_id)
     await radarr_control.finish_movie(tmdb_id=27205)
 
-    await engine.poll_once()
+    await orchestrator.poll_once()
 
     # Job map should be removed and queue item marked completed
     job_map_after = await repo.get_job_map(nzo_id)
@@ -130,7 +144,7 @@ async def test_reconcile_radarr_job(
 async def test_reconcile_sonarr_job(
     sabnzbd_control: SABnzbdControlClient,
     sonarr_control: SonarrControlClient,
-    engine: ConductarrEngine,
+    orchestrator: Orchestrator,
     repo: QueueRepository,
 ) -> None:
     """A SABnzbd job whose nzo_id matches a Sonarr downloadId is mapped to the
@@ -149,7 +163,7 @@ async def test_reconcile_sonarr_job(
     )
     await sonarr_control.release_episode(episode_id=episode_id, nzo_id=nzo_id)
 
-    await engine.poll_once()
+    await orchestrator.poll_once()
 
     job_map = await repo.get_job_map(nzo_id)
     assert job_map is not None, "Job should be mapped after reconcile"
@@ -163,7 +177,7 @@ async def test_reconcile_sonarr_job(
     await sabnzbd_control.finish_job(nzo_id)
     await sonarr_control.finish_episode(episode_id=episode_id)
 
-    await engine.poll_once()
+    await orchestrator.poll_once()
 
     job_map_after = await repo.get_job_map(nzo_id)
     assert job_map_after is None
@@ -175,7 +189,7 @@ async def test_reconcile_sonarr_job(
 
 async def test_reconcile_unmatched_job_is_ignored(
     sabnzbd_control: SABnzbdControlClient,
-    engine: ConductarrEngine,
+    orchestrator: Orchestrator,
     repo: QueueRepository,
 ) -> None:
     """A SABnzbd job with no corresponding Radarr/Sonarr entry is ignored."""
@@ -184,7 +198,7 @@ async def test_reconcile_unmatched_job_is_ignored(
         cat="misc",
     )
 
-    await engine.poll_once()
+    await orchestrator.poll_once()
 
     job_map = await repo.get_job_map(nzo_id)
     assert job_map is None, "Unmatched job should not be mapped"

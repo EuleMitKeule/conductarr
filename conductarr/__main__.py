@@ -33,8 +33,8 @@ from conductarr.const import (
     VERSION,
     LogLevel,
 )
-from conductarr.engine import ConductarrEngine
 from conductarr.log import setup_logging
+from conductarr.orchestrator import Orchestrator
 
 _LOGGER = logging.getLogger(APP_NAME)
 
@@ -133,14 +133,14 @@ def watch(
         config.config_dir / config.config_file
     )
 
-    engine = ConductarrEngine(conductarr_config, database_config=config.database)
+    orchestrator = Orchestrator(config, conductarr_config)
 
     async def _run() -> None:
-        await engine.start()
+        await orchestrator.start()
         try:
             await asyncio.sleep(float("inf"))
         finally:
-            await engine.stop()
+            await orchestrator.stop()
 
     try:
         asyncio.run(_run())

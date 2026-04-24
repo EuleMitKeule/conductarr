@@ -59,9 +59,12 @@ from conductarr.const import (
 __all__ = [
     "AcceptConditionConfig",
     "AnyDatabaseConfig",
+    "Config",
     "ConductarrConfig",
     "ConfigError",
     "DatabaseType",
+    "GeneralConfig",
+    "LoggingConfig",
     "MatcherConfig",
     "MemoryDatabaseConfig",
     "RadarrConfig",
@@ -303,6 +306,7 @@ class UpgradeConfig:
     max_active: int = 1
     daily_scan_interval: int = 86400  # seconds
     retry_after_days: int = 7
+    no_release_retry_days: int = 1
     search_interval: float = 30.0  # seconds between indexer search calls
     accept_conditions: list[AcceptConditionConfig] = field(default_factory=list)
 
@@ -384,6 +388,9 @@ class ConductarrConfig:
                         raw_upgrade.get("daily_scan_interval", 86400)
                     ),
                     retry_after_days=int(raw_upgrade.get("retry_after_days", 7)),
+                    no_release_retry_days=int(
+                        raw_upgrade.get("no_release_retry_days", 1)
+                    ),
                     search_interval=float(raw_upgrade.get("search_interval", 30.0)),
                     accept_conditions=conditions,
                 )
