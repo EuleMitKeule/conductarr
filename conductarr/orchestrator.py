@@ -1095,6 +1095,25 @@ class Orchestrator:
 
             candidate.metadata["upgrade_last_searched_at"] = now_str
 
+            # Filter out releases that do not improve on the current score.
+            # This runs AFTER the transient check so that blocklisted /
+            # non-downloadable releases still trigger the correct cooldown.
+            if available:
+                current_score = await self._get_media_score(source, candidate.source_id)
+                if current_score is not None:
+                    score_filtered = [
+                        r for r in available if r.custom_format_score > current_score
+                    ]
+                    if available and not score_filtered:
+                        _LOGGER.debug(
+                            "All releases for %s/%s filtered: none exceed current "
+                            "score %d",
+                            source,
+                            candidate.source_id,
+                            current_score,
+                        )
+                    available = score_filtered
+
             if available:
                 best = max(available, key=lambda r: r.custom_format_score)
 
@@ -1289,6 +1308,53 @@ class Orchestrator:
             )
 
         return False
+
+    async def _get_media_score(self, source: str, source_id: str) -> int | None:
+        """Return the current custom-format score for *source*/*source_id*.
+
+        Uses file-level data when available (same logic as
+        ``_check_satisfies_conditions``).  Returns ``None`` on any failure so
+        callers can skip the score filter rather than blocking upgrades.
+        """
+        try:
+            if source == "radarr":
+                movie = await self._radarr_client.get_movie(int(source_id))
+                if movie is None:
+                    return None
+                score: int = movie.custom_format_score
+                try:
+                    movie_file = await self._radarr_client.get_movie_file(
+                        int(source_id)
+                    )
+                    if movie_file is not None:
+                        score = movie_file.get("customFormatScore", score)
+                except Exception:
+                    pass
+                return score
+
+            if source == "sonarr":
+                episode = await self._sonarr_client.get_episode(int(source_id))
+                if episode is None:
+                    return None
+                score = episode.custom_format_score
+                if episode.episode_file_id is not None:
+                    try:
+                        ep_file = await self._sonarr_client.get_episode_file(
+                            episode.episode_file_id
+                        )
+                        if ep_file is not None:
+                            score = ep_file.get("customFormatScore", score)
+                    except Exception:
+                        pass
+                return score
+        except Exception:
+            _LOGGER.warning(
+                "Failed to get media score for %s/%s",
+                source,
+                source_id,
+                exc_info=True,
+            )
+        return None
 
     async def _search_releases(self, source: str, item_id: int) -> list[ReleaseResult]:
         """Dispatch a release search to the appropriate Arr client."""
