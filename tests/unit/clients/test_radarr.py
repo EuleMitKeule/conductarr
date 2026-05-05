@@ -129,7 +129,9 @@ class TestGetApi:
         client = RadarrClient(url=BASE_URL, api_key=API_KEY)
         fake_api = MagicMock()
 
-        with patch("conductarr.clients.radarr.AsyncRadarr", return_value=fake_api) as ctor:
+        with patch(
+            "conductarr.clients.radarr.AsyncRadarr", return_value=fake_api
+        ) as ctor:
             assert client._get_api() is fake_api
             assert client._get_api() is fake_api
 
@@ -163,7 +165,9 @@ class TestGetQueue:
         assert await client.get_queue() == []
 
     async def test_auth_error(self, client: RadarrClient, mock_api: MagicMock) -> None:
-        mock_api.queue.get = AsyncMock(side_effect=PyarrUnauthorizedError("unauthorized"))
+        mock_api.queue.get = AsyncMock(
+            side_effect=PyarrUnauthorizedError("unauthorized")
+        )
         with pytest.raises(RadarrAuthError):
             await client.get_queue()
 
@@ -174,7 +178,9 @@ class TestGetQueue:
         with pytest.raises(RadarrConnectionError):
             await client.get_queue()
 
-    async def test_generic_error(self, client: RadarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: RadarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.queue.get = AsyncMock(side_effect=RuntimeError("unexpected"))
         with pytest.raises(RadarrError):
             await client.get_queue()
@@ -216,7 +222,9 @@ class TestGetMovies:
         assert [movie.title for movie in result] == ["Inception"]
 
     async def test_auth_error(self, client: RadarrClient, mock_api: MagicMock) -> None:
-        mock_api.movie.get = AsyncMock(side_effect=PyarrUnauthorizedError("unauthorized"))
+        mock_api.movie.get = AsyncMock(
+            side_effect=PyarrUnauthorizedError("unauthorized")
+        )
         with pytest.raises(RadarrAuthError):
             await client.get_movies()
 
@@ -227,7 +235,9 @@ class TestGetMovies:
         with pytest.raises(RadarrConnectionError):
             await client.get_movies()
 
-    async def test_generic_error(self, client: RadarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: RadarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.movie.get = AsyncMock(side_effect=ValueError("bad"))
         with pytest.raises(RadarrError):
             await client.get_movies()
@@ -251,7 +261,9 @@ class TestGetMovie:
         assert await client.get_movie(999) is None
 
     async def test_auth_error(self, client: RadarrClient, mock_api: MagicMock) -> None:
-        mock_api.movie.get = AsyncMock(side_effect=PyarrUnauthorizedError("unauthorized"))
+        mock_api.movie.get = AsyncMock(
+            side_effect=PyarrUnauthorizedError("unauthorized")
+        )
         with pytest.raises(RadarrAuthError):
             await client.get_movie(1)
 
@@ -262,7 +274,9 @@ class TestGetMovie:
         with pytest.raises(RadarrConnectionError):
             await client.get_movie(1)
 
-    async def test_generic_error(self, client: RadarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: RadarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.movie.get = AsyncMock(side_effect=ValueError("bad"))
         with pytest.raises(RadarrError):
             await client.get_movie(1)
@@ -278,7 +292,9 @@ class TestTriggerSearch:
         mock_api.command.execute.assert_awaited_once_with("MoviesSearch", movieIds=[55])
 
     async def test_auth_error(self, client: RadarrClient, mock_api: MagicMock) -> None:
-        mock_api.command.execute = AsyncMock(side_effect=PyarrUnauthorizedError("unauth"))
+        mock_api.command.execute = AsyncMock(
+            side_effect=PyarrUnauthorizedError("unauth")
+        )
         with pytest.raises(RadarrAuthError):
             await client.trigger_search(1)
 
@@ -289,7 +305,9 @@ class TestTriggerSearch:
         with pytest.raises(RadarrConnectionError):
             await client.trigger_search(1)
 
-    async def test_generic_error(self, client: RadarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: RadarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.command.execute = AsyncMock(side_effect=RuntimeError("crash"))
         with pytest.raises(RadarrError):
             await client.trigger_search(1)
@@ -316,7 +334,9 @@ class TestGetTags:
         with pytest.raises(RadarrConnectionError):
             await client.get_tags()
 
-    async def test_generic_error(self, client: RadarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: RadarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.tag.get = AsyncMock(side_effect=RuntimeError("crash"))
         with pytest.raises(RadarrError):
             await client.get_tags()
@@ -394,7 +414,9 @@ class TestSearchReleases:
         with pytest.raises(RadarrConnectionError):
             await client.search_releases(1)
 
-    async def test_generic_error(self, client: RadarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: RadarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.release.get = AsyncMock(side_effect=RuntimeError("crash"))
         with pytest.raises(RadarrError):
             await client.search_releases(1)
@@ -433,7 +455,9 @@ class TestGrabRelease:
         with pytest.raises(RadarrConnectionError):
             await client.grab_release(self.make_release())
 
-    async def test_generic_error(self, client: RadarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: RadarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.release.add = AsyncMock(side_effect=RuntimeError("crash"))
         with pytest.raises(RadarrError):
             await client.grab_release(self.make_release())

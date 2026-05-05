@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import pytest
@@ -34,12 +34,8 @@ from conductarr.clients.sonarr import (
 BASE_URL = "http://localhost:8989"
 API_KEY = "testapikey"
 
-BLOCKLIST_URL_PATTERN = re.compile(
-    rf"{re.escape(BASE_URL)}/api/v3/blocklist.*"
-)
-EPISODE_FILE_URL_PATTERN = re.compile(
-    rf"{re.escape(BASE_URL)}/api/v3/episodeFile/.*"
-)
+BLOCKLIST_URL_PATTERN = re.compile(rf"{re.escape(BASE_URL)}/api/v3/blocklist.*")
+EPISODE_FILE_URL_PATTERN = re.compile(rf"{re.escape(BASE_URL)}/api/v3/episodeFile/.*")
 
 QUEUE_RESPONSE: dict[str, Any] = {
     "records": [
@@ -195,21 +191,29 @@ class TestGetQueue:
         assert result == []
 
     async def test_auth_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
-        mock_api.queue.get = AsyncMock(side_effect=PyarrUnauthorizedError("unauthorized"))
+        mock_api.queue.get = AsyncMock(
+            side_effect=PyarrUnauthorizedError("unauthorized")
+        )
         with pytest.raises(SonarrAuthError):
             await client.get_queue()
 
-    async def test_connection_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_connection_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.queue.get = AsyncMock(side_effect=PyarrConnectionError("timeout"))
         with pytest.raises(SonarrConnectionError):
             await client.get_queue()
 
-    async def test_os_error_wrapped(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_os_error_wrapped(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.queue.get = AsyncMock(side_effect=OSError("unreachable"))
         with pytest.raises(SonarrConnectionError):
             await client.get_queue()
 
-    async def test_generic_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.queue.get = AsyncMock(side_effect=RuntimeError("unexpected"))
         with pytest.raises(SonarrError):
             await client.get_queue()
@@ -259,16 +263,22 @@ class TestGetSeries:
         assert result[0].title == "Better Call Saul"
 
     async def test_auth_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
-        mock_api.series.get = AsyncMock(side_effect=PyarrUnauthorizedError("unauthorized"))
+        mock_api.series.get = AsyncMock(
+            side_effect=PyarrUnauthorizedError("unauthorized")
+        )
         with pytest.raises(SonarrAuthError):
             await client.get_series()
 
-    async def test_connection_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_connection_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.series.get = AsyncMock(side_effect=ConnectionError("failed"))
         with pytest.raises(SonarrConnectionError):
             await client.get_series()
 
-    async def test_generic_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.series.get = AsyncMock(side_effect=ValueError("bad"))
         with pytest.raises(SonarrError):
             await client.get_series()
@@ -327,12 +337,16 @@ class TestGetEpisodes:
         with pytest.raises(SonarrAuthError):
             await client.get_episodes(1)
 
-    async def test_connection_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_connection_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.episode.get = AsyncMock(side_effect=PyarrConnectionError("down"))
         with pytest.raises(SonarrConnectionError):
             await client.get_episodes(1)
 
-    async def test_generic_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.episode.get = AsyncMock(side_effect=RuntimeError("oops"))
         with pytest.raises(SonarrError):
             await client.get_episodes(1)
@@ -368,12 +382,16 @@ class TestGetEpisode:
         with pytest.raises(SonarrAuthError):
             await client.get_episode(1)
 
-    async def test_connection_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_connection_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.episode.get = AsyncMock(side_effect=ConnectionError("down"))
         with pytest.raises(SonarrConnectionError):
             await client.get_episode(1)
 
-    async def test_generic_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.episode.get = AsyncMock(side_effect=ValueError("bad"))
         with pytest.raises(SonarrError):
             await client.get_episode(1)
@@ -405,16 +423,22 @@ class TestTriggerEpisodeSearch:
         )
 
     async def test_auth_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
-        mock_api.command.execute = AsyncMock(side_effect=PyarrUnauthorizedError("unauth"))
+        mock_api.command.execute = AsyncMock(
+            side_effect=PyarrUnauthorizedError("unauth")
+        )
         with pytest.raises(SonarrAuthError):
             await client.trigger_episode_search(1)
 
-    async def test_connection_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_connection_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.command.execute = AsyncMock(side_effect=PyarrConnectionError("down"))
         with pytest.raises(SonarrConnectionError):
             await client.trigger_episode_search(1)
 
-    async def test_generic_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.command.execute = AsyncMock(side_effect=RuntimeError("crash"))
         with pytest.raises(SonarrError):
             await client.trigger_episode_search(1)
@@ -437,16 +461,22 @@ class TestTriggerSeasonSearch:
         )
 
     async def test_auth_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
-        mock_api.command.execute = AsyncMock(side_effect=PyarrUnauthorizedError("unauth"))
+        mock_api.command.execute = AsyncMock(
+            side_effect=PyarrUnauthorizedError("unauth")
+        )
         with pytest.raises(SonarrAuthError):
             await client.trigger_season_search(1, 1)
 
-    async def test_connection_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_connection_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.command.execute = AsyncMock(side_effect=OSError("unreachable"))
         with pytest.raises(SonarrConnectionError):
             await client.trigger_season_search(1, 1)
 
-    async def test_generic_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.command.execute = AsyncMock(side_effect=RuntimeError("crash"))
         with pytest.raises(SonarrError):
             await client.trigger_season_search(1, 1)
@@ -475,12 +505,16 @@ class TestGetTags:
         with pytest.raises(SonarrAuthError):
             await client.get_tags()
 
-    async def test_connection_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_connection_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.tag.get = AsyncMock(side_effect=PyarrConnectionError("down"))
         with pytest.raises(SonarrConnectionError):
             await client.get_tags()
 
-    async def test_generic_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.tag.get = AsyncMock(side_effect=RuntimeError("crash"))
         with pytest.raises(SonarrError):
             await client.get_tags()
@@ -582,7 +616,9 @@ class TestSearchReleases:
         assert r.download_allowed is True
         mock_api.release.get.assert_awaited_once_with(episode_id=100)
 
-    async def test_empty_result(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_empty_result(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.release.get = AsyncMock(return_value=None)
         result = await client.search_releases(100)
         assert result == []
@@ -592,12 +628,16 @@ class TestSearchReleases:
         with pytest.raises(SonarrAuthError):
             await client.search_releases(1)
 
-    async def test_connection_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_connection_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.release.get = AsyncMock(side_effect=ConnectionError("down"))
         with pytest.raises(SonarrConnectionError):
             await client.search_releases(1)
 
-    async def test_generic_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.release.get = AsyncMock(side_effect=RuntimeError("crash"))
         with pytest.raises(SonarrError):
             await client.search_releases(1)
@@ -634,12 +674,16 @@ class TestGrabRelease:
         with pytest.raises(SonarrAuthError):
             await client.grab_release(self._make_release())
 
-    async def test_connection_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_connection_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.release.add = AsyncMock(side_effect=OSError("down"))
         with pytest.raises(SonarrConnectionError):
             await client.grab_release(self._make_release())
 
-    async def test_generic_error(self, client: SonarrClient, mock_api: MagicMock) -> None:
+    async def test_generic_error(
+        self, client: SonarrClient, mock_api: MagicMock
+    ) -> None:
         mock_api.release.add = AsyncMock(side_effect=RuntimeError("crash"))
         with pytest.raises(SonarrError):
             await client.grab_release(self._make_release())

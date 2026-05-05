@@ -114,6 +114,27 @@ class _NzoCacheEntry:
     unknown: bool = False  # True → queried Arr APIs and found nothing
 
 
+@dataclass
+class DryRunCandidateResult:
+    """Result of a single candidate's dry-run upgrade check."""
+
+    queue: str
+    source: str
+    source_id: str
+    outcome: str
+    """One of: would_grab | no_releases | all_filtered_conditions |
+    all_filtered_transient | no_score_improvement | error"""
+    reason: str
+    media_title: str = ""
+    releases_total: int = 0
+    releases_after_conditions: int = 0
+    releases_after_availability: int = 0
+    releases_after_blocklist: int = 0
+    releases_after_score: int = 0
+    current_score: int | None = None
+    best_release: ReleaseResult | None = None
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -1494,4 +1515,250 @@ class Orchestrator:
 
         _LOGGER.debug(
             "Cache warm-up: loaded %d entry(ies) from DB", len(self._nzo_cache_entries)
+        )
+
+    # ------------------------------------------------------------------
+    # Dry-run (debug) helpers
+    # ------------------------------------------------------------------
+
+    async def dry_run_upgrades(
+        self,
+        source_filter: str | None = None,
+        source_id_filter: str | None = None,
+    ) -> list[DryRunCandidateResult]:
+        """Simulate upgrade selection for the next eligible candidate.
+
+        Iterates candidates exactly as the live scheduler would, silently
+        skipping items that already satisfy their accept_conditions or are
+        already downloading.  Stops after the first candidate that actually
+        reaches the indexer-search step and returns a single result with full
+        filter details — without writing to the database or sending a grab.
+
+        Args:
+            source_filter: If set, restrict to this source ("radarr"/"sonarr").
+            source_id_filter: If set, test this specific media ID directly,
+                bypassing cursor and already-satisfied checks.
+
+        Returns:
+            A list with at most one :class:`DryRunCandidateResult`.
+        """
+        self._blocklist_cache.clear()
+
+        for qc in self._upgrade_queue_configs:
+            upgrade = qc.upgrade
+            if upgrade is None or not upgrade.enabled:
+                continue
+
+            sources = upgrade.sources
+            if source_filter is not None:
+                sources = [s for s in sources if s == source_filter]
+
+            for source in sources:
+                try:
+                    candidates = await self._queue_repository.get_upgrade_candidates(
+                        qc.name,
+                        source,
+                        upgrade.retry_after_days,
+                        upgrade.no_release_retry_days,
+                    )
+                except Exception as exc:
+                    return [
+                        DryRunCandidateResult(
+                            queue=qc.name,
+                            source=source,
+                            source_id="?",
+                            outcome="error",
+                            reason=f"Failed to fetch candidates: {exc}",
+                        )
+                    ]
+
+                if source_id_filter is not None:
+                    # Direct lookup: skip already-satisfied check, test as-is.
+                    candidates = [
+                        c for c in candidates if c.source_id == source_id_filter
+                    ]
+                else:
+                    # Respect cursor so we test the same candidate the
+                    # scheduler would pick next.
+                    cursor = self._candidate_cursor.get((qc.name, source))
+                    if cursor is not None:
+                        try:
+                            cursor_int = int(cursor)
+                            after = [
+                                c for c in candidates if int(c.source_id) > cursor_int
+                            ]
+                            if after:
+                                candidates = after
+                        except ValueError, TypeError:
+                            pass
+
+                for candidate in candidates:
+                    if candidate.metadata.get("upgrade_grabbed"):
+                        continue
+                    if candidate.id is None:
+                        continue
+
+                    if source_id_filter is None:
+                        # Skip items that already satisfy conditions — same
+                        # as the live scheduler, no output for these.
+                        try:
+                            if await self._check_satisfies_conditions(
+                                source,
+                                candidate.source_id,
+                                upgrade.accept_conditions,
+                            ):
+                                continue
+                        except Exception:
+                            pass  # treat as not satisfied
+
+                        # Skip items already being downloaded.
+                        try:
+                            all_maps = await self._queue_repository.get_all_job_maps()
+                            if any(
+                                m["queue_item_id"] == candidate.id for m in all_maps
+                            ):
+                                continue
+                        except Exception:
+                            pass
+
+                    # Found the next real candidate — search and report, then stop.
+                    result = await self._dry_run_one_candidate(
+                        qc.name, source, candidate.source_id, candidate.id, upgrade
+                    )
+                    return [result]
+
+        return []
+
+    async def _dry_run_one_candidate(
+        self,
+        queue_name: str,
+        source: str,
+        source_id: str,
+        candidate_id: int,
+        upgrade: "UpgradeConfig",
+    ) -> DryRunCandidateResult:
+        """Run all release-filter steps for one candidate without side effects.
+
+        Assumes the caller has already verified the candidate is not
+        already_satisfied and not already_downloading.
+        """
+        # Fetch media title for display.
+        media_title = ""
+        try:
+            if source == "radarr":
+                movie = await self._radarr_client.get_movie(int(source_id))
+                if movie is not None:
+                    media_title = movie.title
+            elif source == "sonarr":
+                ep = await self._sonarr_client.get_episode(int(source_id))
+                if ep is not None:
+                    media_title = (
+                        f"S{ep.season_number:02d}E{ep.episode_number:02d} – {ep.title}"
+                    )
+        except Exception:
+            pass
+
+        def _r(**kwargs: Any) -> DryRunCandidateResult:
+            return DryRunCandidateResult(
+                queue=queue_name,
+                source=source,
+                source_id=source_id,
+                media_title=media_title,
+                **kwargs,
+            )
+
+        # 1. Search indexer.
+        try:
+            releases = await self._search_releases(source, int(source_id))
+        except Exception as exc:
+            return _r(outcome="error", reason=f"Release search failed: {exc}")
+
+        releases_total = len(releases)
+
+        # 2. accept_conditions filter.
+        matching = _filter_releases(releases, upgrade.accept_conditions)
+        releases_after_conditions = len(matching)
+
+        if not matching:
+            if releases_total == 0:
+                return _r(
+                    outcome="no_releases",
+                    reason="Indexer returned no releases",
+                    releases_total=0,
+                    releases_after_conditions=0,
+                )
+            return _r(
+                outcome="all_filtered_conditions",
+                reason=(
+                    f"{releases_total} release(s) found but none match accept_conditions"
+                ),
+                releases_total=releases_total,
+                releases_after_conditions=0,
+            )
+
+        # 3. download_allowed filter.
+        available = [r for r in matching if r.download_allowed]
+        releases_after_availability = len(available)
+
+        # 4. Blocklist filter.
+        blocklist = await self._get_blocklist(source)
+        available = [r for r in available if r.title not in blocklist]
+        releases_after_blocklist = len(available)
+
+        if not available:
+            not_dl = releases_after_conditions - releases_after_availability
+            blocklisted = releases_after_availability - releases_after_blocklist
+            parts = []
+            if not_dl:
+                parts.append(f"{not_dl} not downloadable")
+            if blocklisted:
+                parts.append(f"{blocklisted} blocklisted")
+            return _r(
+                outcome="all_filtered_transient",
+                reason=(
+                    f"{releases_after_conditions} condition-matching release(s) "
+                    f"all filtered: {', '.join(parts)}"
+                ),
+                releases_total=releases_total,
+                releases_after_conditions=releases_after_conditions,
+                releases_after_availability=releases_after_availability,
+                releases_after_blocklist=releases_after_blocklist,
+            )
+
+        # 5. Score improvement filter.
+        current_score = await self._get_media_score(source, source_id)
+        releases_after_score = len(available)
+        if current_score is not None:
+            score_filtered = [
+                r for r in available if r.custom_format_score > current_score
+            ]
+            releases_after_score = len(score_filtered)
+            available = score_filtered
+
+        if not available:
+            return _r(
+                outcome="no_score_improvement",
+                reason=(
+                    f"No release exceeds current score {current_score} "
+                    f"({releases_after_blocklist} candidate(s) checked)"
+                ),
+                releases_total=releases_total,
+                releases_after_conditions=releases_after_conditions,
+                releases_after_availability=releases_after_availability,
+                releases_after_blocklist=releases_after_blocklist,
+                releases_after_score=0,
+                current_score=current_score,
+            )
+
+        best = max(available, key=lambda r: r.custom_format_score)
+        return _r(
+            outcome="would_grab",
+            reason=f"Would grab '{best.title}' (score={best.custom_format_score})",
+            releases_total=releases_total,
+            releases_after_conditions=releases_after_conditions,
+            releases_after_availability=releases_after_availability,
+            releases_after_blocklist=releases_after_blocklist,
+            releases_after_score=releases_after_score,
+            current_score=current_score,
+            best_release=best,
         )

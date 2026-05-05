@@ -34,7 +34,7 @@ from conductarr.const import (
     LogLevel,
 )
 from conductarr.log import setup_logging
-from conductarr.orchestrator import Orchestrator
+from conductarr.orchestrator import DryRunCandidateResult, Orchestrator
 
 _LOGGER = logging.getLogger(APP_NAME)
 
@@ -199,6 +199,101 @@ def status(
         config_dir, config_file_name, log_level, log_dir, log_file_name
     )
     _LOGGER.info("Showing status")
+
+
+def _print_dry_run_results(results: list[DryRunCandidateResult]) -> None:
+    """Pretty-print dry-run upgrade results to stdout."""
+    if not results:
+        typer.echo(
+            "No eligible upgrade candidates found (all already satisfied or no candidates due)."
+        )
+        return
+
+    _OUTCOME_ICON: dict[str, str] = {
+        "would_grab": "[GRAB]",
+        "no_releases": "[NONE]",
+        "all_filtered_conditions": "[COND]",
+        "all_filtered_transient": "[BLCK]",
+        "no_score_improvement": "[SCOR]",
+        "error": "[ERR] ",
+    }
+
+    for r in results:
+        icon = _OUTCOME_ICON.get(r.outcome, "[?]  ")
+        title_str = f"  ({r.media_title})" if r.media_title else ""
+        typer.echo(f"\n{icon}  [{r.queue}]  {r.source}/{r.source_id}{title_str}")
+        typer.echo(f"       {r.reason}")
+        if r.releases_total > 0:
+            typer.echo(
+                f"       Releases: {r.releases_total} total"
+                f" -> {r.releases_after_conditions} matched conditions"
+                f" -> {r.releases_after_availability} downloadable"
+                f" -> {r.releases_after_blocklist} not blocklisted"
+                f" -> {r.releases_after_score} improve score"
+            )
+        if r.current_score is not None:
+            typer.echo(f"       Current score: {r.current_score}")
+        if r.best_release is not None:
+            size_mb = r.best_release.size // (1024 * 1024)
+            typer.echo(
+                f"       Best release:  {r.best_release.title}"
+                f"  (score={r.best_release.custom_format_score},"
+                f" quality={r.best_release.quality},"
+                f" size={size_mb:,} MB)"
+            )
+
+
+@app.command(
+    "debug-upgrades", help="Dry-run upgrade selection without grabbing anything."
+)
+def debug_upgrades(
+    config_dir: ConfigDirOpt = DEFAULT_CONFIG_DIR,
+    config_file_name: ConfigFileNameOpt = DEFAULT_CONFIG_FILE_NAME,
+    log_level: LogLevelOpt = None,
+    log_dir: LogDirOpt = None,
+    log_file_name: LogFileNameOpt = None,
+    source: Annotated[
+        str | None,
+        typer.Option(
+            "--source",
+            help="Restrict to a specific source: 'radarr' or 'sonarr'.",
+        ),
+    ] = None,
+    source_id: Annotated[
+        str | None,
+        typer.Option(
+            "--id",
+            help="Restrict to a specific media ID within the source (e.g. '42').",
+        ),
+    ] = None,
+) -> None:
+    """Dry-run upgrade selection without grabbing anything.
+
+    Iterates all configured upgrade queues, selects eligible candidates,
+    searches the indexer, and applies every filter step — but does not
+    write to the database or send any grab request.  Use this to debug
+    why a particular item is or is not being upgraded.
+    """
+    config = _init_config(
+        config_dir, config_file_name, log_level, log_dir, log_file_name
+    )
+    conductarr_config = ConductarrConfig.from_yaml(
+        config.config_dir / config.config_file
+    )
+    orchestrator = Orchestrator(config, conductarr_config)
+
+    async def _run() -> list[DryRunCandidateResult]:
+        await orchestrator.connect()
+        try:
+            return await orchestrator.dry_run_upgrades(
+                source_filter=source,
+                source_id_filter=source_id,
+            )
+        finally:
+            await orchestrator.stop()
+
+    results = asyncio.run(_run())
+    _print_dry_run_results(results)
 
 
 def main() -> None:
