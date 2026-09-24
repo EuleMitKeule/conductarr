@@ -233,6 +233,11 @@ class ArrClient(ABC):
         records = await self._get_paged_records("blocklist")
         return {str(r["sourceTitle"]) for r in records if r.get("sourceTitle")}
 
+    async def get_custom_format_names(self) -> set[str]:
+        """Return the names of all custom formats defined in the Arr."""
+        data = await self._request("GET", "customformat")
+        return {str(cf.get("name", "")) for cf in data or []}
+
     async def grab_release(self, release: ReleaseResult) -> None:
         """Hand *release* (from a previous search) to the Arr's download client."""
         _LOGGER.debug(

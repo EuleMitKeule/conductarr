@@ -90,6 +90,14 @@ async def get_tags(_: None = Depends(_require_api_key)) -> list[dict]:
     return [state.tag_to_dict(t) for t in state.tags.values()]
 
 
+@app.get("/api/v3/customformat")
+async def get_custom_formats(_: None = Depends(_require_api_key)) -> list[dict]:
+    return [
+        {"id": i + 1, "name": name}
+        for i, name in enumerate(["German DL", "HDR", "OV/ENG/GER", "OV/GER"])
+    ]
+
+
 @app.get("/api/v3/queue")
 async def get_queue(_: None = Depends(_require_api_key)) -> dict:
     records = [state.queue_item_to_dict(q) for q in state.queue.values()]

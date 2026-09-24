@@ -22,7 +22,7 @@
 Conductarr sits between Radarr/Sonarr and SABnzbd and does two things:
 
 - **Queue ordering** — every SABnzbd job is mapped to a *virtual queue* (e.g. *user requests*, *other*, *upgrades*) via tag matchers.  The SABnzbd queue is kept in priority order, and by default only the top job downloads while the rest are paused.  Conductarr-initiated upgrades always sort below everything else.
-- **Gradual library upgrades** — for queues with an `upgrade` section, conductarr walks your whole library, finds movies/episodes whose file does not yet satisfy your `accept_conditions` (e.g. the *German DL* custom format), runs an interactive search through the Arr, and grabs the best release that is a real improvement — one item at a time, rate-limited, and only when nothing else is downloading.
+- **Gradual library upgrades** — for queues with an `upgrade` section, conductarr walks your whole library, finds movies/episodes whose file does not yet satisfy your `accept_conditions` (e.g. one of the German-audio custom formats), runs an interactive search through the Arr, and grabs the best release that is a real improvement — one item at a time, rate-limited, and only when nothing else is downloading.
 
 Radarr/Sonarr themselves never need to upgrade anything; conductarr decides *what* to grab, the Arr does the actual import.
 
@@ -42,6 +42,7 @@ Conductarr is built so that it cannot damage your library or disturb normal down
 | Never retries a bad release | Every grabbed release title is remembered per item and never grabbed again (e.g. after a failed import). |
 | User downloads first | Upgrades wait while any other job is in SABnzbd (`defer_to_other_downloads`), sort last (`upgrades_last`) and are limited by `max_active`. Jobs you paused yourself are never resumed; everything conductarr paused is resumed on shutdown (SIGTERM). |
 | Indexer friendly | At most one search per `search_interval` and `max_searches_per_day` per upgrade queue, persisted across restarts. |
+| No wasted searches | Every custom-format name used in `accept_conditions` must exist in the Arr; otherwise the source is skipped with an error listing the available names. |
 | Disk safety | No new upgrades below `min_free_space_gb` (as reported by SABnzbd) or while the SABnzbd queue is paused. |
 | Stable | Every HTTP call has a timeout, every cycle has a watchdog, the queue loop never waits for an indexer search, and a heartbeat file backs the Docker `HEALTHCHECK`. |
 | Observe first | `dry_run: true` runs everything but never reorders, pauses, resumes or grabs. |

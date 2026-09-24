@@ -333,3 +333,24 @@ async def test_history_failure_keeps_tracking(h: Harness) -> None:
     with patch.object(h.sab, "get_history", broken):
         await h.manager.run_cycle()
     assert await h.repo.get_job_map("nzo_up") is not None
+
+
+async def test_order_is_stable_when_sab_requeues_jobs(h: Harness) -> None:
+    """Regression: SABnzbd pre_check moves checked jobs to the end of the queue.
+
+    That must not change which job conductarr keeps active.
+    """
+    for nzo, movie in (("nzo_e1", 1), ("nzo_e2", 2), ("nzo_e3", 3)):
+        h.arr_job(nzo, movie, tags=["request"], has_file=False)
+    await h.manager.run_cycle()
+    assert h.sab.status_of("nzo_e1") == "Downloading"
+
+    # SABnzbd finishes pre-checking e1 and re-adds it at the end
+    job = h.sab.jobs.pop(0)
+    h.sab.jobs.append(job)
+    h.sab.calls.clear()
+    await h.manager.run_cycle()
+
+    assert h.sab.order[0] == "nzo_e1"
+    assert h.sab.status_of("nzo_e1") == "Downloading"
+    assert not [c for c in h.sab.calls if c[0] in ("pause", "resume")]

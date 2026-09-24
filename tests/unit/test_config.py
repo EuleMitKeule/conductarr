@@ -85,6 +85,12 @@ def test_legacy_daily_scan_interval_alias(tmp_path: Path) -> None:
             "requires 'name'",
         ),
         (lambda d: d["queues"][0].update(matchers=[{"type": "tag"}]), "matchers"),
+        (
+            lambda d: d["queues"][1]["upgrade"].update(
+                accept_conditions=[{"type": "any_custom_format"}]
+            ),
+            "requires 'names'",
+        ),
         (lambda d: d["conductarr"].update(poll_intervall=3), "poll_intervall"),
     ],
 )

@@ -6,7 +6,9 @@ search**.  Before searching it checks, in order:
 * the queue is below ``max_active`` in-flight grabs,
 * SABnzbd is reachable, not globally paused and has enough free space,
 * no other (user-initiated) download is waiting (``defer_to_other_downloads``),
-* ``search_interval`` and ``max_searches_per_day`` allow another search.
+* ``search_interval`` and ``max_searches_per_day`` allow another search,
+* every custom format named in ``accept_conditions`` exists in the Arr
+  (a typo would otherwise make every search fail its conditions).
 
 Candidates are walked in ``source_id`` order from a persisted cursor.
 Items that already satisfy the accept_conditions, have no file, are gone,
@@ -42,7 +44,8 @@ _LOGGER = logging.getLogger(__name__)
 
 # Candidates pre-checked (cheap Arr calls, no indexer search) per cycle.
 CHECK_BATCH_SIZE = 25
-# How long cached blocklist answers stay valid.
+# How long cached blocklist / custom-format answers stay valid.
+_FORMATS_TTL = 3600.0
 _BLOCKLIST_TTL = 600.0
 # Repeated "blocked" log lines are emitted at most this often.
 _BLOCK_LOG_INTERVAL = 3600.0
@@ -85,6 +88,7 @@ class UpgradeScheduler:
         self._queue_manager = queue_manager
         self._source_turn: dict[str, int] = {}
         self._blocklist: dict[str, tuple[set[str], float]] = {}
+        self._formats_ok: dict[tuple[str, str], tuple[bool, float]] = {}
         self._block_logged: dict[str, tuple[str, float]] = {}
 
     # ------------------------------------------------------------------
@@ -183,6 +187,8 @@ class UpgradeScheduler:
         turn = self._source_turn.get(queue.name, 0)
         for offset in range(len(sources)):
             source = sources[(turn + offset) % len(sources)]
+            if not await self._conditions_valid(queue.name, source, upgrade):
+                continue
             if await self._process_next_candidate(
                 queue.name, upgrade, source, snapshot
             ):
@@ -224,6 +230,36 @@ class UpgradeScheduler:
         ):
             _LOGGER.info("Upgrade queue '%s' waiting: %s", queue_name, reason)
             self._block_logged[queue_name] = (reason, now)
+
+    async def _conditions_valid(
+        self, queue_name: str, source: str, upgrade: UpgradeConfig
+    ) -> bool:
+        """Check that every configured custom-format name exists in *source*."""
+        key = (queue_name, source)
+        now = time.monotonic()
+        cached = self._formats_ok.get(key)
+        if cached is not None and now - cached[1] < _FORMATS_TTL:
+            return cached[0]
+        wanted = {n for c in upgrade.accept_conditions for n in c.format_names}
+        if not wanted:
+            return True
+        try:
+            existing = await self._arr[source].get_custom_format_names()
+        except Exception as exc:
+            _LOGGER.warning("Could not read %s custom formats: %s", source, exc)
+            return False
+        missing = sorted(wanted - existing)
+        if missing:
+            _LOGGER.error(
+                "Upgrade queue '%s': custom format(s) %s do not exist in %s - "
+                "no searches until accept_conditions are fixed. Available: %s",
+                queue_name,
+                missing,
+                source,
+                ", ".join(sorted(existing)),
+            )
+        self._formats_ok[key] = (not missing, now)
+        return not missing
 
     async def _clear_stale_grabs(self, queue_name: str, upgrade: UpgradeConfig) -> None:
         cutoff = datetime.now(UTC) - timedelta(seconds=upgrade.grab_timeout)

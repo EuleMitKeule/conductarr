@@ -115,6 +115,11 @@ class QueueManager:
         self.entries: dict[str, NzoEntry] = {}
         self._paused_by_us: set[str] = set()
         self._missing_since: dict[str, float] = {}
+        # Order in which jobs were first seen; SABnzbd moves jobs around by
+        # itself (e.g. pre_check re-queues checked jobs at the end), so
+        # the index alone would make the active download flip-flop.
+        self._first_seen: dict[str, int] = {}
+        self._seen_counter = 0
         self._prev_summary: tuple[frozenset[str], bool] | None = None
 
     @property
@@ -172,6 +177,7 @@ class QueueManager:
             return None
 
         self._log_queue_change(sab_queue)
+        self._track_first_seen(sab_queue)
         current = await self._resolve_all(sab_queue.slots)
         await self._handle_departed_jobs(sab_queue)
         await self._reorder_and_enforce(sab_queue, current)
@@ -187,6 +193,16 @@ class QueueManager:
                 if s.status == "Paused" and s.nzo_id not in self._paused_by_us
             },
         )
+
+    def _track_first_seen(self, sab_queue: Queue) -> None:
+        for slot in sorted(sab_queue.slots, key=lambda s: s.index):
+            if slot.nzo_id not in self._first_seen:
+                self._seen_counter += 1
+                self._first_seen[slot.nzo_id] = self._seen_counter
+        current = {s.nzo_id for s in sab_queue.slots}
+        for nzo_id in list(self._first_seen):
+            if nzo_id not in current:
+                del self._first_seen[nzo_id]
 
     def _log_queue_change(self, sab_queue: Queue) -> None:
         summary = (frozenset(s.nzo_id for s in sab_queue.slots), sab_queue.paused)
@@ -447,7 +463,7 @@ class QueueManager:
 
     def _sort_key(
         self, slot: QueueSlot, entries: dict[str, NzoEntry]
-    ) -> tuple[int, int, int]:
+    ) -> tuple[int, int, int, int]:
         rank = self._rank
         entry = entries.get(slot.nzo_id)
         vq_name = entry.virtual_queue if entry else None
@@ -455,7 +471,8 @@ class QueueManager:
         is_upgrade = int(
             self._config.upgrades_last and vq_name in self._upgrade_config_by_queue
         )
-        return (is_upgrade, queue_rank, slot.index)
+        first_seen = self._first_seen.get(slot.nzo_id, 0)
+        return (is_upgrade, queue_rank, first_seen, slot.index)
 
     async def _reorder_and_enforce(
         self, sab_queue: Queue, entries: dict[str, NzoEntry]
