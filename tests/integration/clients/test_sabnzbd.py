@@ -15,7 +15,7 @@ from pathlib import Path
 import aiohttp
 import pytest
 
-from conductarr.clients.sabnzbd import Queue, SABnzbdClient, SABnzbdPriority
+from conductarr.clients.sabnzbd import Queue, SABnzbdClient
 
 _SABNZBD_INI = (
     Path(__file__).parent.parent.parent.parent / "dev" / "sabnzbd" / "sabnzbd.ini"
@@ -81,14 +81,6 @@ async def test_get_history(sabnzbd_client: SABnzbdClient) -> None:
     assert isinstance(result, list)
 
 
-async def test_pause_resume_queue(sabnzbd_client: SABnzbdClient) -> None:
-    paused = await sabnzbd_client.pause_queue()
-    assert paused is True
-
-    resumed = await sabnzbd_client.resume_queue()
-    assert resumed is True
-
-
 async def test_add_and_manage_job(sabnzbd_client: SABnzbdClient) -> None:
     """Upload a minimal NZB and exercise the full per-job API surface."""
     url = sabnzbd_client.url.rstrip("/")
@@ -131,15 +123,9 @@ async def test_add_and_manage_job(sabnzbd_client: SABnzbdClient) -> None:
     resumed = await sabnzbd_client.resume_job(nzo_id)
     assert resumed is True
 
-    # Set priority
-    new_pos = await sabnzbd_client.set_priority(nzo_id, SABnzbdPriority.HIGH)
-    assert isinstance(new_pos, int)
+    # conductarr must never be able to delete jobs or change priorities
+    for forbidden in ("delete_job", "set_priority", "pause_queue", "resume_queue"):
+        assert not hasattr(sabnzbd_client, forbidden)
 
-    # Delete with files
-    deleted = await sabnzbd_client.delete_job(nzo_id, del_files=True)
-    assert deleted is True
-
-    # Job should be gone from queue
-    queue_after = await sabnzbd_client.get_queue()
-    remaining = [s.nzo_id for s in queue_after.slots]
-    assert nzo_id not in remaining
+    # Queue reports free disk space
+    assert queue.diskspace_free_gb is not None

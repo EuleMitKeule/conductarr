@@ -9,14 +9,21 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 import zoneinfo
-from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 import typer
 import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from conductarr.const import (
     APP_NAME,
@@ -57,6 +64,7 @@ from conductarr.const import (
 )
 
 __all__ = [
+    "DEFAULT_ALLOWED_REJECTIONS",
     "AcceptConditionConfig",
     "AnyDatabaseConfig",
     "Config",
@@ -256,7 +264,7 @@ AnyDatabaseConfig = MemoryDatabaseConfig | SQLiteDatabaseConfig
 
 
 # ---------------------------------------------------------------------------
-# Service configuration (plain dataclasses)
+# Service configuration (conductarr / sabnzbd / radarr / sonarr / queues)
 # ---------------------------------------------------------------------------
 
 
@@ -264,89 +272,160 @@ class ConfigError(Exception):
     """Raised when the configuration file is invalid or incomplete."""
 
 
-@dataclass
-class SabnzbdConfig:
+DEFAULT_ALLOWED_REJECTIONS: list[str] = [
+    # Rejections that only exist because the Arr itself is not allowed to
+    # upgrade.  Everything else (wrong movie/episode, unwanted quality or
+    # language, size limits, must-not-contain terms, ...) blocks a grab.
+    "existing file",
+    "cutoff",
+    "upgrade",
+    "custom format score",
+    "equal or higher preference",
+]
+
+
+UpgradeSource = Literal["radarr", "sonarr"]
+
+
+def _default_sources() -> list[UpgradeSource]:
+    return ["radarr", "sonarr"]
+
+
+class _StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class _ServiceConfig(_StrictModel):
     url: str
-    api_key: str
+    api_key: str = ""
+    timeout: float = Field(default=30.0, gt=0)
 
 
-@dataclass
-class RadarrConfig:
-    url: str
-    api_key: str
+class SabnzbdConfig(_ServiceConfig):
+    pass
 
 
-@dataclass
-class SonarrConfig:
-    url: str
-    api_key: str
+class RadarrConfig(_ServiceConfig):
+    search_timeout: float = Field(default=180.0, gt=0)
 
 
-@dataclass
-class MatcherConfig:
-    type: str
-    tags: list[str] = field(default_factory=list)
+class SonarrConfig(_ServiceConfig):
+    search_timeout: float = Field(default=180.0, gt=0)
 
 
-@dataclass
-class AcceptConditionConfig:
+class MatcherConfig(_StrictModel):
+    type: Literal["tags", "has_no_file"]
+    tags: list[str] = Field(default_factory=list)
+
+
+class AcceptConditionConfig(_StrictModel):
     """A single condition that a release must satisfy to be eligible for upgrade."""
 
-    type: str  # "custom_format" | "custom_format_min_score"
+    type: Literal["custom_format", "custom_format_min_score"]
     name: str = ""  # used by custom_format
     value: int = 0  # used by custom_format_min_score
 
+    @model_validator(mode="after")
+    def _check_name(self) -> "AcceptConditionConfig":
+        if self.type == "custom_format" and not self.name:
+            raise ValueError("custom_format condition requires 'name'")
+        return self
 
-@dataclass
-class UpgradeConfig:
+
+class UpgradeConfig(_StrictModel):
     """Upgrade-scheduler settings attached to a virtual queue."""
 
     enabled: bool = True
-    sources: list[str] = field(default_factory=lambda: ["radarr", "sonarr"])
-    max_active: int = 1
-    daily_scan_interval: int = 86400  # seconds
-    retry_after_days: int = 7
-    no_release_retry_days: int = 1
-    search_interval: float = 30.0  # seconds between indexer search calls
-    accept_conditions: list[AcceptConditionConfig] = field(default_factory=list)
+    sources: list[UpgradeSource] = Field(default_factory=_default_sources)
+    max_active: int = Field(default=1, ge=0)
+    """Maximum number of conductarr upgrade downloads in flight at once."""
+    retry_after_days: int = Field(default=7, ge=0)
+    no_release_retry_days: int = Field(default=1, ge=0)
+    search_interval: float = Field(default=300.0, ge=0)
+    """Minimum seconds between two indexer searches of this queue."""
+    max_searches_per_day: int = Field(default=100, ge=0)
+    """Hard cap on indexer searches per rolling 24h (0 = unlimited)."""
+    rescan_interval: float = Field(
+        default=21600.0,
+        ge=0,
+        validation_alias=AliasChoices("rescan_interval", "daily_scan_interval"),
+    )
+    """Seconds between library scans that add new candidates (0 = startup only)."""
+    grab_timeout: float = Field(default=900.0, gt=0)
+    """Seconds a grab may take to show up in SABnzbd before it is released."""
+    accept_conditions: list[AcceptConditionConfig] = Field(min_length=1)
+    min_score_increase: int = Field(default=1, ge=1)
+    allow_resolution_downgrade: bool = False
+    allow_season_packs: bool = True
+    """Allow season packs / multi-episode releases when they are the best option."""
+    include_unmonitored: bool = True
+    defer_to_other_downloads: bool = True
+    """Only start new upgrades while no other (non-upgrade) job is in SABnzbd."""
+    allowed_rejections: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_ALLOWED_REJECTIONS)
+    )
 
 
-@dataclass
-class VirtualQueueConfig:
+class VirtualQueueConfig(_StrictModel):
     name: str
     priority: int
     enabled: bool = True
     fallback: bool = False
-    matchers: list[MatcherConfig] = field(default_factory=list)
+    matchers: list[MatcherConfig] = Field(default_factory=list)
     upgrade: UpgradeConfig | None = None
 
+    @property
+    def is_upgrade_queue(self) -> bool:
+        return self.enabled and self.upgrade is not None and self.upgrade.enabled
 
-@dataclass
-class ConductarrConfig:
-    poll_interval: float
+
+class ConductarrConfig(_StrictModel):
+    poll_interval: float = Field(default=DEFAULT_POLL_INTERVAL, gt=0)
+    dry_run: bool = False
+    """Observe only: never switch/pause/resume SABnzbd jobs, never grab."""
+    enforce_single_download: bool = True
+    """Pause every job except the highest-ranked one."""
+    upgrades_last: bool = True
+    """Always order upgrade-queue jobs below every other job."""
+    min_free_space_gb: float = Field(default=20.0, ge=0)
+    """No new upgrades while SABnzbd reports less free space than this."""
     sabnzbd: SabnzbdConfig
-    radarr: RadarrConfig
-    sonarr: SonarrConfig
-    queues: list[VirtualQueueConfig] = field(default_factory=list)
+    radarr: RadarrConfig | None = None
+    sonarr: SonarrConfig | None = None
+    queues: list[VirtualQueueConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_queues(self) -> "ConductarrConfig":
+        names = [q.name for q in self.queues]
+        duplicates = {n for n in names if names.count(n) > 1}
+        if duplicates:
+            raise ValueError(f"duplicate queue names: {sorted(duplicates)}")
+        for queue in self.upgrade_queues:
+            assert queue.upgrade is not None
+            for source in queue.upgrade.sources:
+                if getattr(self, source) is None:
+                    raise ValueError(
+                        f"queue '{queue.name}' upgrades from {source} but no "
+                        f"'{source}' section is configured"
+                    )
+        return self
+
+    @property
+    def upgrade_queues(self) -> list[VirtualQueueConfig]:
+        return [q for q in self.queues if q.is_upgrade_queue]
 
     @classmethod
     def from_yaml(cls, path: Path) -> "ConductarrConfig":
-        """Load service configuration from a YAML file.
+        """Load and validate the service configuration from a YAML file.
 
         Raises:
-            ConfigError: If any required section is missing.
+            ConfigError: If the file is missing sections or contains invalid values.
         """
         with open(path, encoding="utf-8") as fh:
             data = yaml.safe_load(fh) or {}
 
-        conductarr_data = data.get("conductarr", {})
-        poll_interval = float(
-            conductarr_data.get("poll_interval", DEFAULT_POLL_INTERVAL)
-        )
-
-        for section in ("sabnzbd", "radarr", "sonarr"):
-            if section not in data:
-                raise ConfigError(f"Missing required config section: '{section}'")
+        if not data.get("sabnzbd"):
+            raise ConfigError("Missing required config section: 'sabnzbd'")
 
         sab_data: dict[str, Any] = dict(data["sabnzbd"])
         if not sab_data.get("api_key"):
@@ -354,64 +433,32 @@ class ConductarrConfig:
                 sab_data["api_key"] = _read_sabnzbd_api_key(Path(ini_path))
                 _LOGGER.debug("SABnzbd API key loaded from %s", ini_path)
 
-        radarr_data: dict[str, Any] = dict(data["radarr"])
-        if not radarr_data.get("api_key"):
-            if xml_path := os.environ.get(ENV_DEV_RADARR_CONFIG):
-                radarr_data["api_key"] = _read_arr_api_key(Path(xml_path))
-                _LOGGER.debug("Radarr API key loaded from %s", xml_path)
+        arr_data: dict[str, dict[str, Any] | None] = {}
+        for section, env_var in (
+            ("radarr", ENV_DEV_RADARR_CONFIG),
+            ("sonarr", ENV_DEV_SONARR_CONFIG),
+        ):
+            if not data.get(section):
+                arr_data[section] = None
+                continue
+            section_data = dict(data[section])
+            if not section_data.get("api_key"):
+                if xml_path := os.environ.get(env_var):
+                    section_data["api_key"] = _read_arr_api_key(Path(xml_path))
+                    _LOGGER.debug("%s API key loaded from %s", section, xml_path)
+            arr_data[section] = section_data
 
-        sonarr_data: dict[str, Any] = dict(data["sonarr"])
-        if not sonarr_data.get("api_key"):
-            if xml_path := os.environ.get(ENV_DEV_SONARR_CONFIG):
-                sonarr_data["api_key"] = _read_arr_api_key(Path(xml_path))
-                _LOGGER.debug("Sonarr API key loaded from %s", xml_path)
-
-        # Parse virtual queues
-        queues: list[VirtualQueueConfig] = []
-        for q in data.get("queues", []):
-            matchers = [MatcherConfig(**m) for m in q.get("matchers", [])]
-            upgrade: UpgradeConfig | None = None
-            if raw_upgrade := q.get("upgrade"):
-                conditions = [
-                    AcceptConditionConfig(
-                        type=c["type"],
-                        name=c.get("name", ""),
-                        value=int(c.get("value", 0)),
-                    )
-                    for c in raw_upgrade.get("accept_conditions", [])
-                ]
-                upgrade = UpgradeConfig(
-                    enabled=bool(raw_upgrade.get("enabled", True)),
-                    sources=list(raw_upgrade.get("sources", ["radarr", "sonarr"])),
-                    max_active=int(raw_upgrade.get("max_active", 1)),
-                    daily_scan_interval=int(
-                        raw_upgrade.get("daily_scan_interval", 86400)
-                    ),
-                    retry_after_days=int(raw_upgrade.get("retry_after_days", 7)),
-                    no_release_retry_days=int(
-                        raw_upgrade.get("no_release_retry_days", 1)
-                    ),
-                    search_interval=float(raw_upgrade.get("search_interval", 30.0)),
-                    accept_conditions=conditions,
-                )
-            queues.append(
-                VirtualQueueConfig(
-                    name=q["name"],
-                    priority=int(q["priority"]),
-                    enabled=q.get("enabled", True),
-                    fallback=bool(q.get("fallback", False)),
-                    matchers=matchers,
-                    upgrade=upgrade,
-                )
+        try:
+            return cls.model_validate(
+                {
+                    **(data.get("conductarr") or {}),
+                    "sabnzbd": sab_data,
+                    **arr_data,
+                    "queues": data.get("queues") or [],
+                }
             )
-
-        return cls(
-            poll_interval=poll_interval,
-            sabnzbd=SabnzbdConfig(**sab_data),
-            radarr=RadarrConfig(**radarr_data),
-            sonarr=SonarrConfig(**sonarr_data),
-            queues=queues,
-        )
+        except ValidationError as exc:
+            raise ConfigError(f"Invalid configuration in '{path}':\n{exc}") from exc
 
 
 class Config(BaseModel):

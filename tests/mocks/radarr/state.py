@@ -17,6 +17,7 @@ class MockMovie:
     quality_profile_id: int = 1
     tags: list[int] = field(default_factory=list)
     custom_formats: list[str] = field(default_factory=list)
+    resolution: int = 1080
 
 
 @dataclass
@@ -27,6 +28,10 @@ class MockRelease:
     custom_formats: list[str] = field(default_factory=list)
     custom_format_score: int = 0
     download_allowed: bool = True
+    protocol: str = "usenet"
+    resolution: int = 1080
+    rejections: list[str] = field(default_factory=list)
+    mapped_movie_id: int | None = None
 
 
 @dataclass
@@ -96,6 +101,7 @@ class RadarrState:
         custom_format_score: int = 0,
         tag_labels: list[str] | None = None,
         custom_formats: list[str] | None = None,
+        resolution: int = 1080,
     ) -> MockMovie:
         self._movie_counter += 1
         tag_ids = [self.find_or_create_tag(label) for label in (tag_labels or [])]
@@ -108,6 +114,7 @@ class RadarrState:
             custom_format_score=custom_format_score,
             tags=tag_ids,
             custom_formats=custom_formats or [],
+            resolution=resolution,
         )
         self.movies[movie.id] = movie
         return movie
@@ -171,6 +178,12 @@ class RadarrState:
             "id": movie.id,
             "movieId": movie.id,
             "relativePath": f"{movie.title}.mkv",
+            "quality": {
+                "quality": {
+                    "name": f"Bluray-{movie.resolution}p",
+                    "resolution": movie.resolution,
+                }
+            },
             "customFormatScore": movie.custom_format_score,
             "customFormats": [
                 {"id": i + 1, "name": name}
@@ -215,9 +228,19 @@ class RadarrState:
                 for i, name in enumerate(release.custom_formats)
             ],
             "customFormatScore": release.custom_format_score,
-            "quality": {"quality": {"name": "Bluray-1080p"}},
+            "quality": {
+                "quality": {
+                    "name": f"Bluray-{release.resolution}p",
+                    "resolution": release.resolution,
+                }
+            },
             "size": 4_000_000_000,
             "downloadAllowed": release.download_allowed,
+            "protocol": release.protocol,
+            "rejections": release.rejections,
+            "rejected": bool(release.rejections),
+            "mappedMovieId": release.mapped_movie_id,
+            "indexer": "MockIndexer",
         }
 
     # -- blocklist operations --

@@ -16,14 +16,35 @@
 
 ---
 
+
 ## What it does
 
-Conductarr sits between your \*arr apps and SABnzbd and enforces a strict priority order on the download queue:
+Conductarr sits between Radarr/Sonarr and SABnzbd and does two things:
 
-- **Virtual queues** — you define named tiers (e.g. *user requests*, *upgrade queue*, *kometa*) each with a priority number and tag-based matchers.  Every SABnzbd job is assigned to the highest-matching tier.
-- **Automatic reordering** — each poll cycle the SABnzbd queue is reordered so that higher-priority tiers always run first.  Only one job downloads at a time; everything else is paused.
-- **Upgrade scanning** — queues marked `upgrade: enabled: true` automatically search Radarr/Sonarr for candidates that don't yet satisfy your `accept_conditions` (e.g. missing a custom format or below a score threshold), grab a release, and track it through to completion.  A rate-limited cursor ensures candidates are visited round-robin without hammering the APIs.
-- **Duplicate prevention** — before grabbing a release Conductarr checks both the live SABnzbd queue and the database, so the same movie or episode is never downloaded twice concurrently.
+- **Queue ordering** — every SABnzbd job is mapped to a *virtual queue* (e.g. *user requests*, *other*, *upgrades*) via tag matchers.  The SABnzbd queue is kept in priority order, and by default only the top job downloads while the rest are paused.  Conductarr-initiated upgrades always sort below everything else.
+- **Gradual library upgrades** — for queues with an `upgrade` section, conductarr walks your whole library, finds movies/episodes whose file does not yet satisfy your `accept_conditions` (e.g. the *German DL* custom format), runs an interactive search through the Arr, and grabs the best release that is a real improvement — one item at a time, rate-limited, and only when nothing else is downloading.
+
+Radarr/Sonarr themselves never need to upgrade anything; conductarr decides *what* to grab, the Arr does the actual import.
+
+---
+
+## Safety model
+
+Conductarr is built so that it cannot damage your library or disturb normal downloads:
+
+| Guarantee | How |
+|---|---|
+| Never deletes anything | The clients have no delete/remove methods at all (enforced by a unit test). The only writes are: SABnzbd `switch`/`pause`/`resume` of single jobs, and Arr `POST /release` for one selected release. |
+| Never touches torrents | Only releases with `protocol: usenet` are considered; unknown protocols are rejected. |
+| Never grabs the wrong item | Releases the Arr mapped to a different movie/episode are dropped. Season packs are used when they are the best option, but only if the Arr confirmed they contain the searched episode; the other episodes of a grabbed pack are not searched meanwhile (`allow_season_packs: false` disables packs). |
+| Respects Arr rejections | Only the "not an upgrade / cutoff met" family of rejections (which exist because the Arr itself may not upgrade) is overridden. Anything else — wrong quality, language, size, restricted terms, "already in queue" — blocks the release. |
+| No downgrades | The release must beat the current custom-format score (`min_score_increase`) and may not have a lower resolution than the current file. |
+| Never retries a bad release | Every grabbed release title is remembered per item and never grabbed again (e.g. after a failed import). |
+| User downloads first | Upgrades wait while any other job is in SABnzbd (`defer_to_other_downloads`), sort last (`upgrades_last`) and are limited by `max_active`. Jobs you paused yourself are never resumed; everything conductarr paused is resumed on shutdown (SIGTERM). |
+| Indexer friendly | At most one search per `search_interval` and `max_searches_per_day` per upgrade queue, persisted across restarts. |
+| Disk safety | No new upgrades below `min_free_space_gb` (as reported by SABnzbd) or while the SABnzbd queue is paused. |
+| Stable | Every HTTP call has a timeout, every cycle has a watchdog, the queue loop never waits for an indexer search, and a heartbeat file backs the Docker `HEALTHCHECK`. |
+| Observe first | `dry_run: true` runs everything but never reorders, pauses, resumes or grabs. |
 
 ---
 
@@ -39,68 +60,63 @@ services:
       PUID: 1000
       PGID: 1000
       UMASK: "022"
-      TZ: UTC
+      TZ: Europe/Berlin
       LOG_LEVEL: info
     volumes:
       - /path/to/conductarr/config:/config
     command: conductarr watch
 ```
 
-Place a `conductarr.yml` inside the mounted config directory.  A minimal example:
+Conductarr only needs its own config directory — it never needs access to your media or download folders.
 
-```yaml
-conductarr:
-  poll_interval: 15.0
+Place a `conductarr.yml` inside the config directory; [`config.example.yml`](config.example.yml) documents every option.  Unknown keys are rejected at startup, so typos cannot silently disable a safety setting.
 
-sabnzbd:
-  url: http://sabnzbd:8080
-  api_key: YOUR_KEY
+### Recommended rollout
 
-radarr:
-  url: http://radarr:7878
-  api_key: YOUR_KEY
-
-sonarr:
-  url: http://sonarr:8989
-  api_key: YOUR_KEY
-
-queues:
-  - name: user_requests
-    priority: 100
-    matchers:
-      - type: tags
-        tags: ["request"]
-
-  - name: german_upgrade
-    priority: 50
-    matchers:
-      - type: tags
-        tags: ["upgrade-de"]
-    upgrade:
-      enabled: true
-      sources: [radarr, sonarr]
-      max_active: 2
-      search_interval: 30.0
-      accept_conditions:
-        - type: custom_format
-          name: German DL
-
-  - name: other
-    priority: 1
-    fallback: true
-```
-
-Tag your Radarr/Sonarr items with the matching tags and Conductarr will automatically place them in the right tier.
+1. Start with `dry_run: true` and watch the log for a day: every "would grab", "would pause" and "would move" line shows exactly what conductarr would do.
+2. Try a single item: `conductarr debug-upgrades --source radarr --id 42` (performs one real indexer search, grabs nothing).
+3. Switch to `dry_run: false` with `max_active: 1`.
 
 ---
 
-## Poll loop internals
+## Commands
 
-Every `poll_interval` seconds the orchestrator runs a single cycle:
+| Command | Purpose |
+|---|---|
+| `conductarr watch` | Run the queue and upgrade loops. |
+| `conductarr status` | Read-only overview: candidates per queue, grabs in flight, upgrades done, search budget used. |
+| `conductarr debug-upgrades [--source radarr] [--id 42]` | Evaluate the next candidate (or one item) and print every filter step. No writes, no grab. |
+| `conductarr healthcheck` | Exit 0 if the queue loop completed a cycle recently (used by the Docker `HEALTHCHECK`). |
 
-1. **Read SABnzbd queue** — fetch current slots (silently; no log noise when nothing changes).
-2. **Resolve identities** — map each `nzo_id` to a virtual queue using an in-memory cache.  On a cache miss, Radarr and Sonarr queues are fetched *once* for the whole cycle, not once per item.
-3. **Handle completions** — jobs that disappeared from SABnzbd are marked complete in the database.
-4. **Reorder & enforce** — slots are sorted by virtual-queue priority and `switch()` is called only when the order is actually wrong.  The top slot is resumed; all other pausable slots are paused.
-5. **Fill upgrade slots** — for each upgrade-enabled queue that has capacity, the next unprocessed candidate is fetched from the database, checked against live Radarr/Sonarr data, and if still eligible a release is grabbed and added to SABnzbd.
+---
 
+## How it works
+
+Two independent loops run every `poll_interval`:
+
+**Queue loop**
+
+1. Read the SABnzbd queue.
+2. Map new `nzo_id`s to Radarr/Sonarr items via their queues (one fetch per cycle).  Jobs that could not be mapped are retried every minute.
+3. Finalise jobs that left the queue once SABnzbd history reports `Completed`/`Failed` (post-processing is waited for).  Jobs deleted without history are released after 30 minutes.
+4. Reorder by virtual-queue rank and keep one job active.
+
+**Upgrade loop** (per upgrade queue)
+
+1. Rescan the libraries every `rescan_interval`: every movie/episode with a file becomes a candidate, including items that were first downloaded as a user request.
+2. Skip if `max_active` grabs are in flight, SABnzbd is paused/low on space, other downloads are waiting, or the search budget is used.
+3. Walk candidates from a persisted cursor; items that already satisfy the conditions, have no file or are downloading are skipped without searching.
+4. Search the first real candidate, run the [selection pipeline](conductarr/upgrade/selection.py) (usenet → conditions → mapping → rejections → downloadable → blocklist → resolution → score) and grab the best remaining release.
+
+The grab is recorded in the database *before* the Arr is asked to grab it, so a download can never go untracked.
+
+---
+
+## Development
+
+```bash
+uv sync --all-groups
+uv run pytest tests/unit                 # fast, no services needed
+uv run pytest tests/integration          # starts mock SABnzbd/Radarr/Sonarr via docker compose
+uv run ruff check . && uv run ty check
+```

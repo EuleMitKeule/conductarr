@@ -6,6 +6,8 @@ main execution point when Conductarr is invoked from the command line.
 
 import asyncio
 import logging
+import signal
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -14,6 +16,7 @@ from dotenv import load_dotenv
 
 from conductarr.config import (
     ConductarrConfig,
+    ConfigError,
     Config,
     SQLiteDatabaseConfig,
     load_config,
@@ -33,8 +36,14 @@ from conductarr.const import (
     VERSION,
     LogLevel,
 )
+from conductarr.db.database import Database
+from conductarr.db.repository import QueueRepository
 from conductarr.log import setup_logging
-from conductarr.orchestrator import DryRunCandidateResult, Orchestrator
+from conductarr.orchestrator import (
+    HEARTBEAT_FILE_NAME,
+    DryRunCandidateResult,
+    Orchestrator,
+)
 
 _LOGGER = logging.getLogger(APP_NAME)
 
@@ -113,6 +122,14 @@ def version() -> None:
     typer.echo(f"conductarr version {VERSION}")
 
 
+def _load_service_config(config: Config) -> ConductarrConfig:
+    try:
+        return ConductarrConfig.from_yaml(config.config_dir / config.config_file)
+    except ConfigError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+
 @app.command("watch", help="Start continuous watch mode.")
 def watch(
     config_dir: ConfigDirOpt = DEFAULT_CONFIG_DIR,
@@ -124,21 +141,27 @@ def watch(
     """Start continuous watch mode.
 
     Monitors SABnzbd and orchestrates the download queue based on configured
-    priority rules.
+    priority rules.  SIGTERM/SIGINT trigger a graceful shutdown that resumes
+    every job conductarr paused.
     """
     config = _init_config(
         config_dir, config_file_name, log_level, log_dir, log_file_name
     )
-    conductarr_config = ConductarrConfig.from_yaml(
-        config.config_dir / config.config_file
-    )
-
+    conductarr_config = _load_service_config(config)
     orchestrator = Orchestrator(config, conductarr_config)
 
     async def _run() -> None:
+        stop_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, stop_event.set)
+            except NotImplementedError, RuntimeError:
+                pass  # Windows: KeyboardInterrupt still cancels the run
         await orchestrator.start()
         try:
-            await asyncio.sleep(float("inf"))
+            await stop_event.wait()
+            _LOGGER.info("Shutdown requested")
         finally:
             await orchestrator.stop()
 
@@ -157,8 +180,6 @@ def paths(
 ) -> None:
     """Print all writable paths from config, one per line.
 
-    Outputs the resolved log directory and all symlink library output paths.
-    Each path appears exactly once (duplicates are suppressed).
     Suitable for use in the Docker entrypoint to chown writable mounts.
     """
     config = load_config(
@@ -182,7 +203,28 @@ def paths(
         _emit(config.database.db_file.parent)
 
 
-@app.command("status", help="Show cache stats and last run info.")
+@app.command("healthcheck", help="Exit 0 if the watch loop is alive.")
+def healthcheck(
+    config_dir: ConfigDirOpt = DEFAULT_CONFIG_DIR,
+    max_age: Annotated[
+        float,
+        typer.Option("--max-age", help="Maximum heartbeat age in seconds."),
+    ] = 300.0,
+) -> None:
+    """Check the heartbeat file written after every successful queue cycle."""
+    path = config_dir.resolve() / HEARTBEAT_FILE_NAME
+    try:
+        age = time.time() - float(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError) as exc:
+        typer.echo(f"unhealthy: no heartbeat ({exc})", err=True)
+        raise typer.Exit(code=1) from exc
+    if age > max_age:
+        typer.echo(f"unhealthy: last queue cycle {age:.0f}s ago", err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"healthy: last queue cycle {age:.0f}s ago")
+
+
+@app.command("status", help="Show upgrade progress and search budget.")
 def status(
     config_dir: ConfigDirOpt = DEFAULT_CONFIG_DIR,
     config_file_name: ConfigFileNameOpt = DEFAULT_CONFIG_FILE_NAME,
@@ -190,56 +232,85 @@ def status(
     log_dir: LogDirOpt = None,
     log_file_name: LogFileNameOpt = None,
 ) -> None:
-    """Show cache stats and last run info.
-
-    Displays a summary of the current cache state and when the last scan
-    was performed.
-    """
-    _config = _init_config(
-        config_dir, config_file_name, log_level, log_dir, log_file_name
+    """Show per-queue candidate counts and indexer search usage (read-only)."""
+    config = _init_config(
+        config_dir,
+        config_file_name,
+        log_level or LogLevel.WARNING,
+        log_dir,
+        log_file_name,
     )
-    _LOGGER.info("Showing status")
+    conductarr_config = _load_service_config(config)
+
+    async def _run() -> None:
+        database = Database(config.database)
+        await database.connect()
+        repo = QueueRepository(database)
+        try:
+            typer.echo(
+                f"{'queue':<20} {'source':<8} {'items':>7} {'due':>7} "
+                f"{'grabbed':>8} {'ok':>7} {'no match':>9} {'upgraded':>9}"
+            )
+            upgrade_cfg = {q.name: q.upgrade for q in conductarr_config.upgrade_queues}
+            for row in await repo.get_stats():
+                cfg = upgrade_cfg.get(row["queue"])
+                due = (
+                    await repo.count_upgrade_candidates(
+                        row["queue"],
+                        row["source"],
+                        cfg.retry_after_days,
+                        cfg.no_release_retry_days,
+                    )
+                    if cfg
+                    else 0
+                )
+                typer.echo(
+                    f"{row['queue']:<20} {row['source']:<8} {row['items']:>7} "
+                    f"{due:>7} {row['grabbed']:>8} {row['satisfied']:>7} "
+                    f"{row['no_match']:>9} {row['upgraded']:>9}"
+                )
+            typer.echo("")
+            for queue in conductarr_config.upgrade_queues:
+                assert queue.upgrade is not None
+                used = await repo.count_searches_last_day(queue.name)
+                limit = queue.upgrade.max_searches_per_day or "unlimited"
+                typer.echo(f"Searches last 24h for '{queue.name}': {used} / {limit}")
+            paused = await repo.get_paused_jobs()
+            typer.echo(f"Jobs currently paused by conductarr: {len(paused)}")
+        finally:
+            await database.disconnect()
+
+    asyncio.run(_run())
 
 
 def _print_dry_run_results(results: list[DryRunCandidateResult]) -> None:
     """Pretty-print dry-run upgrade results to stdout."""
     if not results:
         typer.echo(
-            "No eligible upgrade candidates found (all already satisfied or no candidates due)."
+            "No eligible upgrade candidates found "
+            "(all already satisfied, downloading or not due)."
         )
         return
 
-    _OUTCOME_ICON: dict[str, str] = {
-        "would_grab": "[GRAB]",
-        "no_releases": "[NONE]",
-        "all_filtered_conditions": "[COND]",
-        "all_filtered_transient": "[BLCK]",
-        "no_score_improvement": "[SCOR]",
-        "error": "[ERR] ",
-    }
-
     for r in results:
-        icon = _OUTCOME_ICON.get(r.outcome, "[?]  ")
         title_str = f"  ({r.media_title})" if r.media_title else ""
-        typer.echo(f"\n{icon}  [{r.queue}]  {r.source}/{r.source_id}{title_str}")
+        typer.echo(f"\n[{r.outcome}]  [{r.queue}]  {r.source}/{r.source_id}{title_str}")
         typer.echo(f"       {r.reason}")
-        if r.releases_total > 0:
-            typer.echo(
-                f"       Releases: {r.releases_total} total"
-                f" -> {r.releases_after_conditions} matched conditions"
-                f" -> {r.releases_after_availability} downloadable"
-                f" -> {r.releases_after_blocklist} not blocklisted"
-                f" -> {r.releases_after_score} improve score"
-            )
         if r.current_score is not None:
-            typer.echo(f"       Current score: {r.current_score}")
+            typer.echo(
+                f"       Current: score={r.current_score}, "
+                f"resolution={r.current_resolution or '?'}p"
+            )
+        if r.steps:
+            chain = " -> ".join(f"{name}: {n}" for name, n in r.steps)
+            typer.echo(f"       Releases: {r.releases_total} total -> {chain}")
         if r.best_release is not None:
             size_mb = r.best_release.size // (1024 * 1024)
             typer.echo(
                 f"       Best release:  {r.best_release.title}"
                 f"  (score={r.best_release.custom_format_score},"
                 f" quality={r.best_release.quality},"
-                f" size={size_mb:,} MB)"
+                f" size={size_mb:,} MB, indexer={r.best_release.indexer or '?'})"
             )
 
 
@@ -263,23 +334,20 @@ def debug_upgrades(
         str | None,
         typer.Option(
             "--id",
-            help="Restrict to a specific media ID within the source (e.g. '42').",
+            help="Test a specific movie/episode ID within the source (e.g. '42').",
         ),
     ] = None,
 ) -> None:
     """Dry-run upgrade selection without grabbing anything.
 
-    Iterates all configured upgrade queues, selects eligible candidates,
-    searches the indexer, and applies every filter step — but does not
-    write to the database or send any grab request.  Use this to debug
-    why a particular item is or is not being upgraded.
+    Picks the next candidate the scheduler would search (or the given id),
+    runs an indexer search and every filter step, but writes nothing and
+    grabs nothing.  Note: this does perform one real indexer search.
     """
     config = _init_config(
         config_dir, config_file_name, log_level, log_dir, log_file_name
     )
-    conductarr_config = ConductarrConfig.from_yaml(
-        config.config_dir / config.config_file
-    )
+    conductarr_config = _load_service_config(config)
     orchestrator = Orchestrator(config, conductarr_config)
 
     async def _run() -> list[DryRunCandidateResult]:

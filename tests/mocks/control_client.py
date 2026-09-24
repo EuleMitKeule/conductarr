@@ -48,9 +48,18 @@ class SABnzbdControlClient(_BaseControlClient):
         data = await self._post("/control/job/start", json=body)
         return str(data["nzo_id"])
 
-    async def finish_job(self, nzo_id: str) -> None:
-        """Move the job to history (simulates successful post-processing)."""
-        await self._post("/control/job/finish", json={"nzo_id": nzo_id})
+    async def finish_job(self, nzo_id: str, status: str = "Completed") -> None:
+        """Move the job to history with *status* (Completed/Failed/Extracting…)."""
+        await self._post(
+            "/control/job/finish", json={"nzo_id": nzo_id, "status": status}
+        )
+
+    async def pause_job(self, nzo_id: str) -> None:
+        """Pause a job like a user would in the SABnzbd UI."""
+        await self._post("/control/job/pause", json={"nzo_id": nzo_id})
+
+    async def set_diskspace(self, gb: float) -> None:
+        await self._post("/control/diskspace", json={"gb": gb})
 
     async def cancel_job(self, nzo_id: str) -> None:
         """Remove the job without adding it to history (simulates a cancelled download)."""
@@ -84,6 +93,7 @@ class RadarrControlClient(_BaseControlClient):
         custom_format_score: int = 0,
         tags: list[str] | None = None,
         custom_formats: list[str] | None = None,
+        resolution: int = 1080,
     ) -> dict[str, Any]:
         return await self._post(
             "/control/movie/add",
@@ -95,6 +105,7 @@ class RadarrControlClient(_BaseControlClient):
                 "custom_format_score": custom_format_score,
                 "tags": tags or [],
                 "custom_formats": custom_formats or [],
+                "resolution": resolution,
             },
         )
 
@@ -131,6 +142,10 @@ class RadarrControlClient(_BaseControlClient):
         custom_formats: list[str] | None = None,
         custom_format_score: int = 0,
         download_allowed: bool = True,
+        protocol: str = "usenet",
+        resolution: int = 1080,
+        rejections: list[str] | None = None,
+        mapped_tmdb_id: int | None = None,
     ) -> dict[str, Any]:
         return await self._post(
             "/control/release/add",
@@ -142,6 +157,10 @@ class RadarrControlClient(_BaseControlClient):
                 "custom_formats": custom_formats or [],
                 "custom_format_score": custom_format_score,
                 "download_allowed": download_allowed,
+                "protocol": protocol,
+                "resolution": resolution,
+                "rejections": rejections or [],
+                "mapped_tmdb_id": mapped_tmdb_id,
             },
         )
 
@@ -211,6 +230,11 @@ class SonarrControlClient(_BaseControlClient):
         custom_formats: list[str] | None = None,
         custom_format_score: int = 0,
         download_allowed: bool = True,
+        protocol: str = "usenet",
+        resolution: int = 1080,
+        rejections: list[str] | None = None,
+        full_season: bool = False,
+        mapped_episode_ids: list[int] | None = None,
     ) -> dict[str, Any]:
         return await self._post(
             "/control/release/add",
@@ -222,6 +246,11 @@ class SonarrControlClient(_BaseControlClient):
                 "custom_formats": custom_formats or [],
                 "custom_format_score": custom_format_score,
                 "download_allowed": download_allowed,
+                "protocol": protocol,
+                "resolution": resolution,
+                "rejections": rejections or [],
+                "full_season": full_season,
+                "mapped_episode_ids": mapped_episode_ids or [],
             },
         )
 

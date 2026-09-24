@@ -1,14 +1,27 @@
 ---
 conductarr:
   poll_interval: 15.0
+  # Start with dry_run: true on a new setup. conductarr then logs what it
+  # would reorder, pause and grab, but never touches SABnzbd or the Arrs.
+  dry_run: false
+  # Keep exactly one job downloading; all others are paused (and resumed on
+  # shutdown). Jobs you paused yourself are never resumed.
+  enforce_single_download: true
+  # Upgrade jobs always sort below every other job (requests, RSS, manual NZBs).
+  upgrades_last: true
+  # No new upgrades while SABnzbd reports less free space than this.
+  min_free_space_gb: 20
 
 sabnzbd:
   url: http://sabnzbd:8080
   api_key: xxx
+  # timeout: 30
 
 radarr:
   url: http://radarr:7878
   api_key: xxx
+  # timeout: 30          # normal API calls
+  # search_timeout: 180  # interactive indexer searches / grabs
 
 sonarr:
   url: http://sonarr:8989
@@ -21,28 +34,52 @@ queues:
       - type: tags
         tags: [ "request", "overseerr" ]
 
+  # Everything else the Arrs download on their own (RSS, manual searches).
+  - name: other
+    priority: 10
+    fallback: true
+
   - name: german_upgrade
-    priority: 50
-    matchers:
-      - type: tags
-        tags: [ "upgrade-de" ]
+    priority: 1
     upgrade:
       enabled: true
-      sources:
-        - radarr
-        - sonarr
-      max_active: 2
-      daily_scan_interval: 86400
+      sources: [ radarr, sonarr ]
+      # How many conductarr upgrades may be in SABnzbd at the same time.
+      max_active: 1
+      # Only start a new upgrade while no other download is in SABnzbd.
+      defer_to_other_downloads: true
+      # Indexer protection: minimum seconds between two searches and a hard
+      # daily cap (0 = unlimited). Every search hits all indexers via the Arr.
+      search_interval: 300
+      max_searches_per_day: 100
+      # Re-check an item after this many days (no usable release found).
       retry_after_days: 7
+      # Shorter cool-down when releases exist but are blocklisted/unavailable.
       no_release_retry_days: 1
-      search_interval: 30.0
+      # How often the libraries are scanned for new items (seconds).
+      rescan_interval: 21600
+      # A grab that never shows up in SABnzbd frees its slot after this.
+      grab_timeout: 900
+      # An item is "done" once its file satisfies ALL of these conditions.
       accept_conditions:
         - type: custom_format
           name: German DL
-
-  - name: kometa
-    priority: 10
-    enabled: false
-    matchers:
-      - type: tags
-        tags: [ "kometa" ]
+      # --- safety (defaults shown) ---
+      # Release must beat the current file's custom-format score by this much.
+      min_score_increase: 1
+      # Never replace e.g. a 2160p file with a 1080p release.
+      allow_resolution_downgrade: false
+      # Season packs / multi-episode releases may be grabbed when they are the
+      # best option (on equal score a single episode is preferred). Episodes
+      # covered by a grabbed pack are not searched again meanwhile.
+      allow_season_packs: true
+      # Also upgrade unmonitored movies/episodes.
+      include_unmonitored: true
+      # Arr rejections that are OK to override (only the "not an upgrade /
+      # cutoff met" family). Any other rejection blocks the release.
+      # allowed_rejections:
+      #   - existing file
+      #   - cutoff
+      #   - upgrade
+      #   - custom format score
+      #   - equal or higher preference

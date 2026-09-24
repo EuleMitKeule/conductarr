@@ -12,8 +12,8 @@ services:
       - ./config-docker:/config
     command: conductarr watch
     healthcheck:
-      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
-      interval: 2s
+      test: ["CMD", "conductarr", "healthcheck", "--config-dir", "/config"]
+      interval: 10s
       timeout: 3s
       retries: 10
       start_period: 5s
