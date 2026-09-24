@@ -249,3 +249,29 @@ class TestSelectRelease:
             "resolution",
             "score",
         ]
+
+
+class TestAnyCustomFormat:
+    COND = AcceptConditionConfig(
+        type="any_custom_format", names=["OV/ENG/GER", "OV/GER"]
+    )
+
+    def test_media_satisfied_by_any_name(self) -> None:
+        assert media_satisfies_conditions(["OV/GER"], 0, [self.COND])
+        assert media_satisfies_conditions(["OV/ENG/GER", "x"], 0, [self.COND])
+        assert not media_satisfies_conditions(["OV/ENG"], 0, [self.COND])
+
+    def test_release_filter_uses_any_name(self) -> None:
+        upgrade = _upgrade(accept_conditions=[self.COND])
+        dl = _release(guid="a", title="a", custom_formats=["OV/ENG/GER"])
+        eng = _release(
+            guid="b", title="b", custom_formats=["OV/ENG"], custom_format_score=900
+        )
+        result = _select([dl, eng], upgrade=upgrade)
+        assert result.best == dl
+
+    def test_format_names(self) -> None:
+        assert self.COND.format_names == ["OV/ENG/GER", "OV/GER"]
+        assert GERMAN_DL.format_names == ["German DL"]
+        score = AcceptConditionConfig(type="custom_format_min_score", value=5)
+        assert score.format_names == []

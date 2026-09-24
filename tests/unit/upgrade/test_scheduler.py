@@ -470,3 +470,47 @@ async def test_external_pack_download_blocks_all_its_episodes() -> None:
     assert h.sonarr.searches == []
     assert h.manager.entries["nzo_pack"].covered_ids == ["1", "2"]
     await h.db.disconnect()
+
+
+# ---------------------------------------------------------------------------
+# Custom-format validation
+# ---------------------------------------------------------------------------
+
+
+async def test_unknown_custom_format_name_blocks_searches(h: Harness) -> None:
+    """Regression: 'German DL' did not exist in the Arr → every search wasted."""
+    h.radarr.add_media(1)
+    _german(h.radarr, 1)
+    h.radarr.custom_format_names = {"OV/ENG/GER", "OV/GER"}
+    h.sonarr.add_media(5)
+    _german(h.sonarr, 5)
+    await h.seed()
+
+    for _ in range(3):
+        await h.cycle()
+
+    assert h.radarr.searches == []
+    assert len(h.sonarr.grabbed) == 1
+
+
+async def test_any_custom_format_condition_end_to_end() -> None:
+    h = await _build(
+        upgrade={
+            "sources": ["radarr"],
+            "accept_conditions": [
+                {"type": "any_custom_format", "names": ["OV/ENG/GER", "OV/GER"]}
+            ],
+        }
+    )
+    h.radarr.add_media(1, formats=["OV/GER"])  # already done
+    h.radarr.add_media(2, formats=["OV/ENG"], score=25000)
+    release = h.radarr.add_release(
+        2, custom_formats=["OV/ENG/GER"], custom_format_score=45000
+    )
+    await h.seed()
+
+    await h.cycle()
+
+    assert h.radarr.searches == [2]
+    assert h.radarr.grabbed == [release]
+    await h.db.disconnect()

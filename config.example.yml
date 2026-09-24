@@ -60,10 +60,15 @@ queues:
       rescan_interval: 21600
       # A grab that never shows up in SABnzbd frees its slot after this.
       grab_timeout: 900
-      # An item is "done" once its file satisfies ALL of these conditions.
+      # An item is "done" once its file satisfies ALL of these conditions, and
+      # only releases satisfying them are grabbed. Names must match the custom
+      # formats in Radarr/Sonarr exactly (checked at startup). Types:
+      #   custom_format:            name: X        - file has format X
+      #   any_custom_format:        names: [X, Y]  - file has at least one of them
+      #   custom_format_min_score:  value: N       - file scores at least N
       accept_conditions:
-        - type: custom_format
-          name: German DL
+        - type: any_custom_format
+          names: [ "OV/ENG/GER", "OV/GER" ]
       # --- safety (defaults shown) ---
       # Release must beat the current file's custom-format score by this much.
       min_score_increase: 1

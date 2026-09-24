@@ -321,15 +321,27 @@ class MatcherConfig(_StrictModel):
 class AcceptConditionConfig(_StrictModel):
     """A single condition that a release must satisfy to be eligible for upgrade."""
 
-    type: Literal["custom_format", "custom_format_min_score"]
+    type: Literal["custom_format", "any_custom_format", "custom_format_min_score"]
     name: str = ""  # used by custom_format
+    names: list[str] = Field(default_factory=list)  # used by any_custom_format
     value: int = 0  # used by custom_format_min_score
 
     @model_validator(mode="after")
     def _check_name(self) -> "AcceptConditionConfig":
         if self.type == "custom_format" and not self.name:
             raise ValueError("custom_format condition requires 'name'")
+        if self.type == "any_custom_format" and not self.names:
+            raise ValueError("any_custom_format condition requires 'names'")
         return self
+
+    @property
+    def format_names(self) -> list[str]:
+        """Custom-format names this condition refers to."""
+        if self.type == "custom_format":
+            return [self.name]
+        if self.type == "any_custom_format":
+            return list(self.names)
+        return []
 
 
 class UpgradeConfig(_StrictModel):

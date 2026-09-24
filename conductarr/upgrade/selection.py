@@ -67,6 +67,9 @@ def media_satisfies_conditions(
         if cond.type == "custom_format":
             if cond.name not in custom_formats:
                 return False
+        elif cond.type == "any_custom_format":
+            if not any(name in custom_formats for name in cond.names):
+                return False
         elif cond.type == "custom_format_min_score":
             if custom_format_score < cond.value:
                 return False

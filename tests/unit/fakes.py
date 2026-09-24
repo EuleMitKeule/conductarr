@@ -125,6 +125,7 @@ class FakeArr(ArrClient):
         self.tags: dict[int, list[str]] = {}
         self.releases: dict[int, list[ReleaseResult]] = {}
         self.blocklist: set[str] = set()
+        self.custom_format_names = {"German DL", "OV/ENG/GER", "OV/GER"}
         self.grabbed: list[ReleaseResult] = []
         self.searches: list[int] = []
         self.fail_grab = False
@@ -195,6 +196,9 @@ class FakeArr(ArrClient):
         if self.fail_grab:
             raise ArrConnectionError("grab failed")
         self.grabbed.append(release)
+
+    async def get_custom_format_names(self) -> set[str]:
+        return set(self.custom_format_names)
 
     async def get_blocklist_source_titles(self) -> set[str]:
         return set(self.blocklist)
