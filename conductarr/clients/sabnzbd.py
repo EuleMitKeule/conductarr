@@ -78,15 +78,15 @@ class QueueSlot:
     def from_dict(cls, data: dict[str, Any]) -> QueueSlot:
         return cls(
             nzo_id=data["nzo_id"],
-            filename=data["filename"],
-            cat=data["cat"],
-            priority=data["priority"],
-            status=data["status"],
+            filename=str(data.get("filename", "")),
+            cat=str(data.get("cat", "")),
+            priority=str(data.get("priority", "")),
+            status=str(data.get("status", "")),
             index=int(data["index"]),
-            mb=data["mb"],
-            mbleft=data["mbleft"],
-            percentage=data["percentage"],
-            timeleft=data["timeleft"],
+            mb=str(data.get("mb", "")),
+            mbleft=str(data.get("mbleft", "")),
+            percentage=str(data.get("percentage", "")),
+            timeleft=str(data.get("timeleft", "")),
             labels=list(data.get("labels", [])),
         )
 
@@ -97,15 +97,24 @@ class Queue:
     paused: bool
     noofslots: int
     slots: list[QueueSlot]
+    diskspace_free_gb: float | None = None
+    """Smallest free space (GB) of SABnzbd's download/complete folders."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Queue:
         queue = data["queue"]
+        free: list[float] = []
+        for key in ("diskspace1", "diskspace2"):
+            try:
+                free.append(float(queue[key]))
+            except KeyError, TypeError, ValueError:
+                continue
         return cls(
             status=queue["status"],
             paused=bool(queue["paused"]),
             noofslots=int(queue["noofslots"]),
             slots=[QueueSlot.from_dict(s) for s in queue.get("slots", [])],
+            diskspace_free_gb=min(free) if free else None,
         )
 
 
@@ -128,6 +137,7 @@ class SABnzbdClient:
 
     url: str
     api_key: str
+    timeout: float = 30.0
     _session: aiohttp.ClientSession | None = field(default=None, init=False, repr=False)
 
     # ------------------------------------------------------------------
@@ -135,7 +145,9 @@ class SABnzbdClient:
     # ------------------------------------------------------------------
 
     async def __aenter__(self) -> SABnzbdClient:
-        self._session = aiohttp.ClientSession()
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=self.timeout)
+        )
         return self
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
@@ -170,14 +182,18 @@ class SABnzbdClient:
 
         owns_session = self._session is None
         session: aiohttp.ClientSession = (
-            self._session if self._session is not None else aiohttp.ClientSession()
+            self._session
+            if self._session is not None
+            else aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self.timeout)
+            )
         )
 
         try:
             async with session.get(endpoint, params=all_params) as resp:
                 text = await resp.text()
-        except aiohttp.ServerTimeoutError as exc:
-            raise SABnzbdTimeoutError(str(exc)) from exc
+        except (aiohttp.ServerTimeoutError, TimeoutError) as exc:
+            raise SABnzbdTimeoutError(str(exc) or "request timed out") from exc
         except aiohttp.ClientConnectionError as exc:
             raise SABnzbdConnectionError(str(exc)) from exc
         except aiohttp.ClientError as exc:
@@ -228,26 +244,6 @@ class SABnzbdClient:
         data = await self._request(mode="queue", name="resume", value=nzo_id)
         return bool(data.get("status", False))
 
-    async def delete_job(self, nzo_id: str, del_files: bool = False) -> bool:
-        """Delete a job, optionally removing its downloaded files."""
-        data = await self._request(
-            mode="queue",
-            name="delete",
-            value=nzo_id,
-            del_files=1 if del_files else 0,
-        )
-        return bool(data.get("status", False))
-
-    async def set_priority(self, nzo_id: str, priority: int) -> int:
-        """Set the priority of a job and return its new position."""
-        data = await self._request(
-            mode="queue",
-            name="priority",
-            value=nzo_id,
-            value2=priority,
-        )
-        return int(data["position"])
-
     async def switch(self, nzo_id: str, other_nzo_id: str) -> tuple[int, int]:
         """Move *nzo_id* to directly above *other_nzo_id*.
 
@@ -267,19 +263,18 @@ class SABnzbdClient:
         )
         return (-1, -1)
 
-    async def pause_queue(self) -> bool:
-        """Pause the entire download queue."""
-        data = await self._request(mode="pause")
-        return bool(data.get("status", False))
+    async def get_history(
+        self, nzo_ids: list[str] | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Return raw history slots, optionally filtered to *nzo_ids*.
 
-    async def resume_queue(self) -> bool:
-        """Resume the entire download queue."""
-        data = await self._request(mode="resume")
-        return bool(data.get("status", False))
-
-    async def get_history(self) -> list[dict[str, Any]]:
-        """Return raw history slots."""
-        data = await self._request(mode="history")
+        Older SABnzbd versions ignore the ``nzo_ids`` filter; callers must
+        therefore still match on ``nzo_id`` themselves.
+        """
+        params: dict[str, Any] = {"mode": "history", "limit": limit}
+        if nzo_ids:
+            params["nzo_ids"] = ",".join(nzo_ids)
+        data = await self._request(silent=True, **params)
         return list(data["history"]["slots"])
 
     async def version(self) -> str:

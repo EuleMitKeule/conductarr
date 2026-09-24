@@ -27,6 +27,7 @@ class MockEpisode:
     has_file: bool = False
     custom_format_score: int = 0
     custom_formats: list[str] = field(default_factory=list)
+    resolution: int = 1080
 
 
 @dataclass
@@ -55,6 +56,11 @@ class MockRelease:
     custom_formats: list[str] = field(default_factory=list)
     custom_format_score: int = 0
     download_allowed: bool = True
+    protocol: str = "usenet"
+    resolution: int = 1080
+    rejections: list[str] = field(default_factory=list)
+    full_season: bool = False
+    mapped_episode_ids: list[int] = field(default_factory=list)
 
 
 class SonarrState:
@@ -204,6 +210,12 @@ class SonarrState:
             "episodeId": ep.id,
             "seriesId": ep.series_id,
             "relativePath": f"Season {ep.season_number}/{ep.title}.mkv",
+            "quality": {
+                "quality": {
+                    "name": f"WEBDL-{ep.resolution}p",
+                    "resolution": ep.resolution,
+                }
+            },
             "customFormatScore": ep.custom_format_score,
             "customFormats": [
                 {"id": i + 1, "name": name} for i, name in enumerate(ep.custom_formats)
@@ -251,9 +263,20 @@ class SonarrState:
                 for i, name in enumerate(release.custom_formats)
             ],
             "customFormatScore": release.custom_format_score,
-            "quality": {"quality": {"name": "Bluray-1080p"}},
+            "quality": {
+                "quality": {
+                    "name": f"WEBDL-{release.resolution}p",
+                    "resolution": release.resolution,
+                }
+            },
             "size": 4_000_000_000,
             "downloadAllowed": release.download_allowed,
+            "protocol": release.protocol,
+            "rejections": release.rejections,
+            "rejected": bool(release.rejections),
+            "fullSeason": release.full_season,
+            "mappedEpisodeInfo": [{"id": i} for i in release.mapped_episode_ids],
+            "indexer": "MockIndexer",
         }
 
     # -- blocklist operations --

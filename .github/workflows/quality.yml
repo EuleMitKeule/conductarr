@@ -55,7 +55,7 @@ jobs:
         run: |
           uv run ruff check .
 
-  mypy:
+  ty:
     needs: cache
     runs-on: ubuntu-latest
     steps:
@@ -72,9 +72,9 @@ jobs:
       - name: Install dependecies
         run: uv sync --all-groups
 
-      - name: Run mypy
+      - name: Run ty
         run: |
-          uv run mypy --strict .
+          uv run ty check
 
   unit-tests:
     needs: cache

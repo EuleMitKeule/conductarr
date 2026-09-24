@@ -157,6 +157,11 @@ class AddReleaseRequest(BaseModel):
     custom_formats: list[str] = []
     custom_format_score: int = 0
     download_allowed: bool = True
+    protocol: str = "usenet"
+    resolution: int = 1080
+    rejections: list[str] = []
+    full_season: bool = False
+    mapped_episode_ids: list[int] = []
 
 
 class BlocklistAddRequest(BaseModel):
@@ -258,6 +263,11 @@ async def control_release_add(body: AddReleaseRequest) -> dict:
         custom_formats=body.custom_formats,
         custom_format_score=body.custom_format_score,
         download_allowed=body.download_allowed,
+        protocol=body.protocol,
+        resolution=body.resolution,
+        rejections=body.rejections,
+        full_season=body.full_season,
+        mapped_episode_ids=body.mapped_episode_ids,
     )
     state.add_release(ep.id, release)
     return state.release_to_dict(release)

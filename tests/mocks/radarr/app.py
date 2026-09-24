@@ -120,6 +120,7 @@ class AddMovieRequest(BaseModel):
     custom_format_score: int = 0
     tags: list[str] = []
     custom_formats: list[str] = []
+    resolution: int = 1080
 
 
 class AddReleaseRequest(BaseModel):
@@ -130,6 +131,10 @@ class AddReleaseRequest(BaseModel):
     custom_formats: list[str] = []
     custom_format_score: int = 0
     download_allowed: bool = True
+    protocol: str = "usenet"
+    resolution: int = 1080
+    rejections: list[str] = []
+    mapped_tmdb_id: int | None = None
 
 
 class BlocklistAddRequest(BaseModel):
@@ -172,6 +177,7 @@ async def control_movie_add(body: AddMovieRequest) -> dict:
         custom_format_score=body.custom_format_score,
         tag_labels=body.tags,
         custom_formats=body.custom_formats,
+        resolution=body.resolution,
     )
     return state.movie_to_dict(movie)
 
@@ -225,7 +231,13 @@ async def control_release_add(body: AddReleaseRequest) -> dict:
         custom_formats=body.custom_formats,
         custom_format_score=body.custom_format_score,
         download_allowed=body.download_allowed,
+        protocol=body.protocol,
+        resolution=body.resolution,
+        rejections=body.rejections,
     )
+    if body.mapped_tmdb_id is not None:
+        mapped = state.find_movie_by_tmdb(body.mapped_tmdb_id)
+        release.mapped_movie_id = mapped.id if mapped else -1
     state.add_release(movie.id, release)
     return state.release_to_dict(release)
 

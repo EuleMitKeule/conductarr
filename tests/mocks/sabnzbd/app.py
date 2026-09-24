@@ -30,6 +30,15 @@ class JobIdRequest(BaseModel):
     nzo_id: str
 
 
+class FinishJobRequest(BaseModel):
+    nzo_id: str
+    status: str = "Completed"
+
+
+class DiskspaceRequest(BaseModel):
+    gb: float
+
+
 # ---------------------------------------------------------------------------
 # Real API — all via /api with query parameters
 # ---------------------------------------------------------------------------
@@ -87,7 +96,9 @@ async def api_handler(request: Request) -> JSONResponse | PlainTextResponse:
         return JSONResponse(state.resume_queue())
 
     if mode == "history":
-        return JSONResponse(state.get_history_response())
+        ids = [i for i in params.get("nzo_ids", "").split(",") if i]
+        limit = int(params.get("limit") or 0) or None
+        return JSONResponse(state.get_history_response(ids, limit))
 
     if mode == "addfile":
         async with request.form() as form:
@@ -125,9 +136,9 @@ async def control_job_start(body: StartJobRequest) -> dict:
 
 
 @app.post("/control/job/finish")
-async def control_job_finish(body: JobIdRequest) -> dict:
-    """Move the job to history (simulating successful post-processing)."""
-    state.finish_job(body.nzo_id)
+async def control_job_finish(body: FinishJobRequest) -> dict:
+    """Move the job to history with *status* (Completed/Failed/Extracting...)."""
+    state.finish_job(body.nzo_id, body.status)
     return {"ok": True}
 
 
@@ -135,6 +146,19 @@ async def control_job_finish(body: JobIdRequest) -> dict:
 async def control_job_cancel(body: JobIdRequest) -> dict:
     """Remove the job without adding it to history (simulating a cancelled download)."""
     state.remove_job(body.nzo_id)
+    return {"ok": True}
+
+
+@app.post("/control/job/pause")
+async def control_job_pause(body: JobIdRequest) -> dict:
+    """Pause a job the way a user would in the SABnzbd UI."""
+    state.pause_job(body.nzo_id)
+    return {"ok": True}
+
+
+@app.post("/control/diskspace")
+async def control_diskspace(body: DiskspaceRequest) -> dict:
+    state.diskspace_gb = f"{body.gb:.2f}"
     return {"ok": True}
 
 

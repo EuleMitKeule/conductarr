@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -83,7 +84,7 @@ def _wait_for_healthy() -> None:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def mock_services() -> None:  # type: ignore[misc]
+def mock_services() -> Generator[None]:
     """Ensure mock services are running for integration tests."""
     already_running = _all_running()
 

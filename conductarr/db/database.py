@@ -34,6 +34,7 @@ class Database:
         self._conn = await aiosqlite.connect(db_path)
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
+        await self._conn.execute("PRAGMA busy_timeout=5000")
         _LOGGER.info("Database connected: %s", db_path)
         await self._run_migrations()
 
@@ -53,6 +54,13 @@ class Database:
     async def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
         """Execute a single SQL statement."""
         await self._db.execute(sql, params)
+        await self._db.commit()
+
+    async def executemany(self, sql: str, params_seq: list[tuple[Any, ...]]) -> None:
+        """Execute *sql* once per parameter tuple inside a single transaction."""
+        if not params_seq:
+            return
+        await self._db.executemany(sql, params_seq)
         await self._db.commit()
 
     async def fetchall(

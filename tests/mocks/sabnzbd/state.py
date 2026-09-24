@@ -42,6 +42,7 @@ class SABnzbdState:
         self._counter: int = 0
         self.switch_call_count: int = 0
         self.is_offline: bool = False
+        self.diskspace_gb: str = "500.00"
 
     def reset(self) -> None:
         self.jobs.clear()
@@ -50,6 +51,7 @@ class SABnzbdState:
         self._counter = 0
         self.switch_call_count = 0
         self.is_offline = False
+        self.diskspace_gb = "500.00"
 
     def generate_nzo_id(self) -> str:
         self._counter += 1
@@ -80,7 +82,7 @@ class SABnzbdState:
         self.jobs.pop(nzo_id, None)
         self._reindex()
 
-    def finish_job(self, nzo_id: str) -> None:
+    def finish_job(self, nzo_id: str, status: str = "Completed") -> None:
         """Remove a job from the queue and place it into history as Completed.
 
         This is the authoritative completion path.  The orchestrator uses the
@@ -94,7 +96,7 @@ class SABnzbdState:
                 nzo_id=nzo_id,
                 filename=job.filename,
                 cat=job.cat,
-                status="Completed",
+                status=status,
             )
 
     def _reindex(self) -> None:
@@ -170,6 +172,8 @@ class SABnzbdState:
                 "paused": self.queue_paused,
                 "noofslots": len(slots),
                 "noofslots_total": len(slots),
+                "diskspace1": self.diskspace_gb,
+                "diskspace2": self.diskspace_gb,
                 "slots": [
                     {
                         "nzo_id": j.nzo_id,
@@ -189,7 +193,9 @@ class SABnzbdState:
             }
         }
 
-    def get_history_response(self) -> dict[str, Any]:
+    def get_history_response(
+        self, nzo_ids: list[str] | None = None, limit: int | None = None
+    ) -> dict[str, Any]:
         slots = [
             {
                 "nzo_id": h.nzo_id,
@@ -199,7 +205,10 @@ class SABnzbdState:
                 "completed": 1,
             }
             for h in self.history.values()
+            if not nzo_ids or h.nzo_id in nzo_ids
         ]
+        if limit:
+            slots = slots[:limit]
         return {
             "history": {
                 "slots": slots,

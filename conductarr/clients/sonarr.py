@@ -1,506 +1,114 @@
-"""Async Sonarr API client."""
+"""Async Sonarr API client.
+
+The Sonarr unit of work is a single *episode*: upgrade candidates, queue
+resolution and release searches are all keyed by ``episode_id``.
+"""
 
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass, field
-from typing import Any, cast
-from urllib.parse import urlparse
+from typing import Any, ClassVar
 
-import aiohttp
-from pyarr import AsyncSonarr
-from pyarr.exceptions import (
-    PyarrConnectionError,
-    PyarrResourceNotFound,
-    PyarrUnauthorizedError,
+from conductarr.clients.arr import (
+    ArrClient,
+    ArrNotFoundError,
+    parse_custom_formats,
+    parse_quality,
+    parse_release,
 )
-
-from conductarr.clients.release import ReleaseResult
-
-_LOGGER = logging.getLogger(__name__)
+from conductarr.clients.release import MediaState, ReleaseResult
 
 
-# ---------------------------------------------------------------------------
-# Custom exceptions
-# ---------------------------------------------------------------------------
+class SonarrClient(ArrClient):
+    source: ClassVar[str] = "sonarr"
 
+    def _queue_media_key(self) -> str:
+        return "episodeId"
 
-class SonarrError(Exception):
-    """Base Sonarr client error."""
-
-
-class SonarrConnectionError(SonarrError):
-    """Raised when a connection to Sonarr cannot be established."""
-
-
-class SonarrAuthError(SonarrError):
-    """Raised when authentication with Sonarr fails."""
-
-
-# ---------------------------------------------------------------------------
-# Response models
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class SonarrQueueItem:
-    download_id: str  # = SABnzbd nzo_id
-    series_id: int
-    episode_id: int
-    title: str
-    status: str
-    quality: str
-    custom_format_score: int
-
-
-@dataclass(frozen=True, slots=True)
-class SonarrSeries:
-    id: int
-    title: str
-    tvdb_id: int
-    monitored: bool
-    status: str
-    tag_ids: list[int] = field(default_factory=list)
-
-
-@dataclass(frozen=True, slots=True)
-class SonarrEpisode:
-    id: int
-    series_id: int
-    episode_number: int
-    season_number: int
-    title: str
-    monitored: bool
-    has_file: bool
-    custom_format_score: int
-    custom_formats: list[str] = field(default_factory=list)
-    episode_file_id: int | None = None
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _parse_url(url: str) -> tuple[str, int, bool]:
-    """Return (host, port, tls) from a full URL string."""
-    parsed = urlparse(url)
-    tls = parsed.scheme == "https"
-    host = parsed.hostname or "localhost"
-    if parsed.port:
-        port = parsed.port
-    else:
-        port = 443 if tls else 8989
-    return host, port, tls
-
-
-# ---------------------------------------------------------------------------
-# Client
-# ---------------------------------------------------------------------------
-
-
-class SonarrClient:
-    """Async Sonarr client wrapping :class:`pyarr.AsyncSonarr`."""
-
-    def __init__(self, url: str, api_key: str) -> None:
-        self._url = url
-        self._api_key = api_key
-        self._api: AsyncSonarr | None = None
-
-    def _get_api(self) -> AsyncSonarr:
-        """Return the underlying client, constructing it on first use."""
-        if not self._api_key:
-            raise SonarrAuthError("No Sonarr API key configured")
-        if self._api is None:
-            host, port, tls = _parse_url(self._url)
-            self._api = AsyncSonarr(
-                host=host, api_key=self._api_key, port=port, tls=tls
-            )
-        return self._api
-
-    # ------------------------------------------------------------------
-    # Queue
-    # ------------------------------------------------------------------
-
-    async def get_queue(self) -> list[SonarrQueueItem]:
-        """Return all current Sonarr queue items."""
+    async def _get_episode(self, episode_id: int) -> dict[str, Any] | None:
         try:
-            data = await self._get_api().queue.get(page_size=1000)
-        except PyarrUnauthorizedError as exc:
-            raise SonarrAuthError(str(exc)) from exc
-        except (PyarrConnectionError, ConnectionError, OSError) as exc:
-            raise SonarrConnectionError(str(exc)) from exc
-        except Exception as exc:
-            raise SonarrError(str(exc)) from exc
-
-        records = [
-            SonarrQueueItem(
-                download_id=item.get("downloadId", ""),
-                series_id=item.get("seriesId", 0),
-                episode_id=item.get("episodeId", 0),
-                title=item.get("title", ""),
-                status=item.get("status", ""),
-                quality=(item.get("quality", {}).get("quality", {}).get("name", "")),
-                custom_format_score=item.get("customFormatScore", 0),
-            )
-            for item in data.get("records", [])
-        ]
-        return records
-
-    # ------------------------------------------------------------------
-    # Series
-    # ------------------------------------------------------------------
-
-    async def get_series(self, *, monitored: bool | None = None) -> list[SonarrSeries]:
-        """Return all series, optionally filtered by *monitored*."""
-        _LOGGER.debug(
-            "Sonarr get_series: fetching all series (monitored=%s)", monitored
-        )
-        try:
-            raw = cast(list[dict[str, Any]], await self._get_api().series.get())
-        except PyarrUnauthorizedError as exc:
-            raise SonarrAuthError(str(exc)) from exc
-        except (PyarrConnectionError, ConnectionError, OSError) as exc:
-            raise SonarrConnectionError(str(exc)) from exc
-        except Exception as exc:
-            raise SonarrError(str(exc)) from exc
-
-        series = [
-            SonarrSeries(
-                id=s["id"],
-                title=s.get("title", ""),
-                tvdb_id=s.get("tvdbId", 0),
-                monitored=s.get("monitored", False),
-                status=s.get("status", ""),
-                tag_ids=list(s.get("tags", [])),
-            )
-            for s in raw
-        ]
-        if monitored is not None:
-            series = [s for s in series if s.monitored is monitored]
-        _LOGGER.debug("Sonarr get_series: got %d series", len(series))
-        return series
-
-    # ------------------------------------------------------------------
-    # Episodes
-    # ------------------------------------------------------------------
-
-    async def get_episodes(
-        self,
-        series_id: int,
-        *,
-        monitored: bool | None = None,
-        has_file: bool | None = None,
-    ) -> list[SonarrEpisode]:
-        """Return episodes for a series, optionally filtered."""
-        try:
-            raw = cast(
-                list[dict[str, Any]],
-                await self._get_api().episode.get(series_id=series_id),
-            )
-        except PyarrUnauthorizedError as exc:
-            raise SonarrAuthError(str(exc)) from exc
-        except (PyarrConnectionError, ConnectionError, OSError) as exc:
-            raise SonarrConnectionError(str(exc)) from exc
-        except Exception as exc:
-            raise SonarrError(str(exc)) from exc
-
-        episodes = [self._to_episode(e) for e in raw]
-        if monitored is not None:
-            episodes = [e for e in episodes if e.monitored is monitored]
-        if has_file is not None:
-            episodes = [e for e in episodes if e.has_file is has_file]
-        return episodes
-
-    async def get_episode(self, episode_id: int) -> SonarrEpisode | None:
-        """Look up a single episode by ID.  Returns ``None`` if not found."""
-        _LOGGER.debug("Sonarr get_episode: episode_id=%d", episode_id)
-        try:
-            raw = cast(
-                dict[str, Any],
-                await self._get_api().episode.get(item_id=episode_id),
-            )
-        except PyarrResourceNotFound:
-            _LOGGER.debug("Sonarr get_episode: episode_id=%d not found", episode_id)
+            data = await self._request("GET", f"episode/{episode_id}")
+        except ArrNotFoundError:
             return None
-        except PyarrUnauthorizedError as exc:
-            raise SonarrAuthError(str(exc)) from exc
-        except (PyarrConnectionError, ConnectionError, OSError) as exc:
-            raise SonarrConnectionError(str(exc)) from exc
-        except Exception as exc:
-            raise SonarrError(str(exc)) from exc
+        return data if isinstance(data, dict) else None
 
-        episode = self._to_episode(raw)
-        _LOGGER.debug(
-            "Sonarr get_episode: found episode S%02dE%02d '%s'",
-            episode.season_number,
-            episode.episode_number,
-            episode.title,
-        )
-        return episode
-
-    # ------------------------------------------------------------------
-    # Commands
-    # ------------------------------------------------------------------
-
-    async def trigger_episode_search(self, episode_id: int) -> bool:
-        """Trigger an episode search.  Returns ``True`` on success.
-
-        .. warning::
-            This initiates an actual download search in Sonarr.  Only call
-            from the :class:`~conductarr.upgrade.scheduler.UpgradeScheduler`.
-        """
-        _LOGGER.debug("Sonarr trigger_episode_search: episode_id=%d", episode_id)
+    async def _get_series(self, series_id: int) -> dict[str, Any] | None:
         try:
-            await self._get_api().command.execute(
-                "EpisodeSearch", episodeIds=[episode_id]
-            )
-        except PyarrUnauthorizedError as exc:
-            raise SonarrAuthError(str(exc)) from exc
-        except (PyarrConnectionError, ConnectionError, OSError) as exc:
-            raise SonarrConnectionError(str(exc)) from exc
-        except Exception as exc:
-            raise SonarrError(str(exc)) from exc
-        _LOGGER.debug(
-            "Sonarr trigger_episode_search: command dispatched for episode_id=%d",
-            episode_id,
+            data = await self._request("GET", f"series/{series_id}")
+        except ArrNotFoundError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    async def get_media_state(self, media_id: int) -> MediaState | None:
+        episode = await self._get_episode(media_id)
+        if episode is None:
+            return None
+        label = (
+            f"S{int(episode.get('seasonNumber') or 0):02d}"
+            f"E{int(episode.get('episodeNumber') or 0):02d}"
         )
-        return True
+        series = episode.get("series")
+        series_title = series.get("title") if isinstance(series, dict) else None
+        title = f"{series_title} {label}" if series_title else label
+        if episode.get("title"):
+            title = f"{title} - {episode['title']}"
 
-    async def trigger_season_search(self, series_id: int, season_number: int) -> bool:
-        """Trigger a season search.  Returns ``True`` on success.
-
-        .. warning::
-            This initiates an actual download search in Sonarr.  Only call
-            from the :class:`~conductarr.upgrade.scheduler.UpgradeScheduler`.
-        """
-        _LOGGER.debug(
-            "Sonarr trigger_season_search: series_id=%d season=%d",
-            series_id,
-            season_number,
-        )
-        try:
-            await self._get_api().command.execute(
-                "SeasonSearch",
-                seriesId=series_id,
-                seasonNumber=season_number,
-            )
-        except PyarrUnauthorizedError as exc:
-            raise SonarrAuthError(str(exc)) from exc
-        except (PyarrConnectionError, ConnectionError, OSError) as exc:
-            raise SonarrConnectionError(str(exc)) from exc
-        except Exception as exc:
-            raise SonarrError(str(exc)) from exc
-        _LOGGER.debug(
-            "Sonarr trigger_season_search: command dispatched for series_id=%d season=%d",
-            series_id,
-            season_number,
-        )
-        return True
-
-    # ------------------------------------------------------------------
-    # Tags
-    # ------------------------------------------------------------------
-
-    async def get_tags(self) -> dict[int, str]:
-        """Return a mapping of tag_id → label for all Sonarr tags."""
-        _LOGGER.debug("Sonarr get_tags: fetching all tags")
-        try:
-            raw = cast(list[dict[str, Any]], await self._get_api().tag.get())
-        except PyarrUnauthorizedError as exc:
-            raise SonarrAuthError(str(exc)) from exc
-        except (PyarrConnectionError, ConnectionError, OSError) as exc:
-            raise SonarrConnectionError(str(exc)) from exc
-        except Exception as exc:
-            raise SonarrError(str(exc)) from exc
-        tag_map = {t["id"]: t["label"] for t in raw}
-        _LOGGER.debug("Sonarr get_tags: got %d tag(s)", len(tag_map))
-        return tag_map
-
-    async def get_episode_tags(self, episode_id: int) -> list[str]:
-        """Return tag labels for the parent series of the given episode."""
-        _LOGGER.debug("Sonarr get_episode_tags: episode_id=%d", episode_id)
-        try:
-            ep_raw = cast(
-                dict[str, Any],
-                await self._get_api().episode.get(item_id=episode_id),
-            )
-        except PyarrResourceNotFound:
-            return []
-        except PyarrUnauthorizedError as exc:
-            raise SonarrAuthError(str(exc)) from exc
-        except (PyarrConnectionError, ConnectionError, OSError) as exc:
-            raise SonarrConnectionError(str(exc)) from exc
-        except Exception as exc:
-            raise SonarrError(str(exc)) from exc
-
-        series_id: int = ep_raw.get("seriesId", 0)
-        if not series_id:
-            return []
-
-        try:
-            series_raw = cast(
-                dict[str, Any],
-                await self._get_api().series.get(item_id=series_id),
-            )
-        except PyarrResourceNotFound:
-            return []
-        except PyarrUnauthorizedError as exc:
-            raise SonarrAuthError(str(exc)) from exc
-        except (PyarrConnectionError, ConnectionError, OSError) as exc:
-            raise SonarrConnectionError(str(exc)) from exc
-        except Exception as exc:
-            raise SonarrError(str(exc)) from exc
-
-        tag_ids: list[int] = series_raw.get("tags", [])
-        if not tag_ids:
-            return []
-        tag_map = await self.get_tags()
-        tags = [tag_map[tid] for tid in tag_ids if tid in tag_map]
-        _LOGGER.debug(
-            "Sonarr get_episode_tags: episode_id=%d got %d tag(s)",
-            episode_id,
-            len(tags),
-        )
-        return tags
-
-    # ------------------------------------------------------------------
-    # Releases
-    # ------------------------------------------------------------------
-
-    async def search_releases(self, episode_id: int) -> list[ReleaseResult]:
-        """Search for available releases for *episode_id* via GET /api/v3/release."""
-        _LOGGER.debug("Sonarr search_releases: episode_id=%d", episode_id)
-        try:
-            raw = await self._get_api().release.get(episode_id=episode_id)
-        except PyarrUnauthorizedError as exc:
-            raise SonarrAuthError(str(exc)) from exc
-        except (PyarrConnectionError, ConnectionError, OSError) as exc:
-            raise SonarrConnectionError(str(exc)) from exc
-        except Exception as exc:
-            raise SonarrError(str(exc)) from exc
-
-        results = [self._to_release(item) for item in (raw or [])]
-        _LOGGER.debug(
-            "Sonarr search_releases: episode_id=%d got %d release(s)",
-            episode_id,
-            len(results),
-        )
-        return results
-
-    async def grab_release(self, release: ReleaseResult) -> None:
-        """Force-grab *release* via POST /api/v3/release."""
-        _LOGGER.debug(
-            "Sonarr grab_release: guid=%s title='%s'", release.guid, release.title
-        )
-        try:
-            await self._get_api().release.add(release.guid, release.indexer_id)
-        except PyarrUnauthorizedError as exc:
-            raise SonarrAuthError(str(exc)) from exc
-        except (PyarrConnectionError, ConnectionError, OSError) as exc:
-            raise SonarrConnectionError(str(exc)) from exc
-        except Exception as exc:
-            raise SonarrError(str(exc)) from exc
-        _LOGGER.debug("Sonarr grab_release: successfully grabbed '%s'", release.title)
-
-    async def get_blocklist_source_titles(self) -> set[str]:
-        """Return the ``sourceTitle`` of every blocklisted release.
-
-        Fetches ``GET /api/v3/blocklist?pageSize=1000``, paginating until all
-        records are consumed.  Each record contributes its ``sourceTitle``
-        (the NZB/torrent filename), which corresponds to
-        :attr:`~conductarr.clients.release.ReleaseResult.title`.
-        """
-        url = f"{self._url.rstrip('/')}/api/v3/blocklist"
-        headers = {"X-Api-Key": self._api_key}
-        titles: set[str] = set()
-        page = 1
-        while True:
+        has_file = bool(episode.get("hasFile", False))
+        file_data: dict[str, Any] | None = None
+        file_id = episode.get("episodeFileId")
+        if has_file and file_id:
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(
-                        url,
-                        headers=headers,
-                        params={"pageSize": "1000", "page": str(page)},
-                    ) as resp:
-                        resp.raise_for_status()
-                        data: dict[str, Any] = await resp.json()
-            except aiohttp.ServerTimeoutError as exc:
-                raise SonarrConnectionError(str(exc)) from exc
-            except aiohttp.ClientError as exc:
-                raise SonarrConnectionError(str(exc)) from exc
-            except Exception as exc:
-                raise SonarrError(str(exc)) from exc
-
-            records: list[dict[str, Any]] = data.get("records", [])
-            for record in records:
-                title = record.get("sourceTitle", "")
-                if title:
-                    titles.add(title)
-            if not records or len(records) < 1000:
-                break
-            page += 1
-
-        _LOGGER.debug("Sonarr blocklist: fetched %d source title(s)", len(titles))
-        return titles
-
-    async def get_episode_file(self, episode_file_id: int) -> dict[str, Any] | None:
-        """Return the episode-file record for *episode_file_id*, or None.
-
-        Calls ``/api/v3/episodeFile/{id}`` which reliably populates
-        ``customFormats`` and ``customFormatScore`` for the actual file on
-        disk, unlike the ``/api/v3/episode`` endpoint.
-        """
-        _LOGGER.debug("Sonarr get_episode_file: episode_file_id=%d", episode_file_id)
-        url = f"{self._url.rstrip('/')}/api/v3/episodeFile/{episode_file_id}"
-        headers = {"X-Api-Key": self._api_key}
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers) as resp:
-                    if resp.status == 404:
-                        return None
-                    resp.raise_for_status()
-                    data: dict[str, Any] = await resp.json()
-        except aiohttp.ServerTimeoutError as exc:
-            raise SonarrConnectionError(str(exc)) from exc
-        except aiohttp.ClientError as exc:
-            raise SonarrConnectionError(str(exc)) from exc
-        _LOGGER.debug(
-            "Sonarr get_episode_file: episode_file_id=%d → score=%d formats=%s",
-            episode_file_id,
-            data.get("customFormatScore", 0),
-            [cf.get("name", "") for cf in data.get("customFormats", [])],
-        )
-        return data
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _to_release(data: dict[str, Any]) -> ReleaseResult:
-        return ReleaseResult(
-            guid=data.get("guid", ""),
-            title=data.get("title", ""),
-            indexer_id=data.get("indexerId", 0),
-            custom_formats=[cf.get("name", "") for cf in data.get("customFormats", [])],
-            custom_format_score=data.get("customFormatScore", 0),
-            quality=data.get("quality", {}).get("quality", {}).get("name", ""),
-            size=data.get("size", 0),
-            download_allowed=data.get("downloadAllowed", True),
+                data = await self._request("GET", f"episodeFile/{int(file_id)}")
+                file_data = data if isinstance(data, dict) else None
+            except ArrNotFoundError:
+                file_data = None
+        quality, resolution = parse_quality(file_data or {})
+        return MediaState(
+            media_id=media_id,
+            title=title,
+            monitored=bool(episode.get("monitored", False)),
+            has_file=has_file and file_data is not None,
+            custom_formats=parse_custom_formats(file_data or {}),
+            custom_format_score=int((file_data or {}).get("customFormatScore") or 0),
+            quality=quality,
+            resolution=resolution,
         )
 
-    @staticmethod
-    def _to_episode(data: dict[str, Any]) -> SonarrEpisode:
-        return SonarrEpisode(
-            id=data["id"],
-            series_id=data.get("seriesId", 0),
-            episode_number=data.get("episodeNumber", 0),
-            season_number=data.get("seasonNumber", 0),
-            title=data.get("title", ""),
-            monitored=data.get("monitored", False),
-            has_file=data.get("hasFile", False),
-            custom_format_score=data.get("customFormatScore", 0),
-            custom_formats=[cf.get("name", "") for cf in data.get("customFormats", [])],
-            episode_file_id=data.get("episodeFileId") or None,
+    async def get_media_tags(self, media_id: int) -> list[str]:
+        """Tags live on the series, so resolve episode → series → tags."""
+        episode = await self._get_episode(media_id)
+        if episode is None or not episode.get("seriesId"):
+            return []
+        series = await self._get_series(int(episode["seriesId"]))
+        if series is None:
+            return []
+        return await self._labels_for([int(t) for t in series.get("tags") or []])
+
+    async def list_media_ids_with_files(self) -> list[int]:
+        series_list = await self._request("GET", "series")
+        ids: list[int] = []
+        for series in series_list or []:
+            stats = series.get("statistics") or {}
+            if stats and not stats.get("episodeFileCount"):
+                continue
+            episodes = await self._request(
+                "GET", "episode", params={"seriesId": int(series["id"])}
+            )
+            ids.extend(int(e["id"]) for e in episodes or [] if e.get("hasFile"))
+        return sorted(ids)
+
+    async def search_releases(self, media_id: int) -> list[ReleaseResult]:
+        raw = await self._request(
+            "GET",
+            "release",
+            params={"episodeId": media_id},
+            timeout=self._search_timeout,
         )
+        results: list[ReleaseResult] = []
+        for item in raw or []:
+            mapped = [
+                int(e["id"])
+                for e in item.get("mappedEpisodeInfo") or []
+                if isinstance(e, dict) and e.get("id")
+            ]
+            results.append(parse_release(item, mapped))
+        return results

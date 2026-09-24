@@ -31,5 +31,9 @@ RUN chmod +x /docker-entrypoint.sh
 
 VOLUME /config
 
+# Healthy while the queue loop completes cycles (heartbeat file in /config).
+HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
+    CMD conductarr healthcheck --config-dir "$CONFIG_DIR" || exit 1
+
 ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["conductarr", "--help"]
