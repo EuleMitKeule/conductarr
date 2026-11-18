@@ -6,9 +6,13 @@ here.  :mod:`conductarr.clients.radarr` and :mod:`conductarr.clients.sonarr`
 only add the media-specific bits.
 
 Safety note: this client deliberately exposes **no** method that deletes
-anything or triggers an Arr-side automatic search.  The only write operation
-is :meth:`ArrClient.grab_release`, which hands one explicitly selected
-release to the Arr's download client.
+anything or triggers an Arr-side automatic search.  There are two write
+operations: :meth:`ArrClient.grab_release` hands one explicitly selected
+release to the Arr's download client, and
+:meth:`ArrClient.import_completed_download` imports the files of one finished
+download that conductarr grabbed itself.  The Arr replaces the episode/movie
+file it had before (into its recycle bin, if one is configured), exactly as
+its own completed-download handling would for an upgrade.
 """
 
 from __future__ import annotations
@@ -16,11 +20,17 @@ from __future__ import annotations
 import logging
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import Any, ClassVar
 
 import aiohttp
 
-from conductarr.clients.release import ArrQueueItem, MediaState, ReleaseResult
+from conductarr.clients.release import (
+    ArrDownloadStatus,
+    ArrQueueItem,
+    MediaState,
+    ReleaseResult,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -271,9 +281,91 @@ class ArrClient(ABC):
             )
         return items
 
+    async def get_download_status(self, download_id: str) -> list[ArrDownloadStatus]:
+        """Return the queue records of one download (several for season packs)."""
+        records = await self._get_paged_records("queue", self._queue_params())
+        wanted = download_id.lower()
+        result: list[ArrDownloadStatus] = []
+        for record in records:
+            if str(record.get("downloadId") or "").lower() != wanted:
+                continue
+            messages = [
+                str(message)
+                for entry in record.get("statusMessages") or []
+                if isinstance(entry, dict)
+                for message in entry.get("messages") or []
+                if message
+            ]
+            result.append(
+                ArrDownloadStatus(
+                    download_id=str(record.get("downloadId")),
+                    status=str(record.get("status") or ""),
+                    state=str(record.get("trackedDownloadState") or ""),
+                    messages=messages,
+                )
+            )
+        return result
+
+    async def import_completed_download(
+        self, download_id: str, is_allowed: Callable[[list[str]], bool]
+    ) -> int:
+        """Import the files of a finished download the Arr refuses to import.
+
+        Only files whose rejections all pass *is_allowed* are imported (the
+        caller allows the "not an upgrade" family).  Returns the number of
+        files handed to the Arr; ``0`` means nothing was imported.
+        """
+        items = await self._request(
+            "GET",
+            "manualimport",
+            params={"downloadId": download_id, "filterExistingFiles": "false"},
+            timeout=self._search_timeout,
+        )
+        files: list[dict[str, Any]] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            if not is_allowed(_parse_rejections(item.get("rejections"))):
+                _LOGGER.info(
+                    "%s: not importing %s (%s)",
+                    self.source,
+                    item.get("path"),
+                    "; ".join(_parse_rejections(item.get("rejections"))),
+                )
+                continue
+            payload = self._manual_import_file(item)
+            if payload is None:
+                continue
+            payload["downloadId"] = download_id
+            files.append(payload)
+        if not files:
+            return 0
+        await self._request(
+            "POST",
+            "command",
+            json={"name": "ManualImport", "importMode": "auto", "files": files},
+            timeout=self._search_timeout,
+        )
+        return len(files)
+
+    @staticmethod
+    def _common_import_fields(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "path": item.get("path"),
+            "folderName": item.get("folderName"),
+            "quality": item.get("quality"),
+            "languages": item.get("languages") or [],
+            "releaseGroup": item.get("releaseGroup") or "",
+            "indexerFlags": int(item.get("indexerFlags") or 0),
+        }
+
     # ------------------------------------------------------------------
     # Media-specific API (implemented by subclasses)
     # ------------------------------------------------------------------
+
+    @abstractmethod
+    def _manual_import_file(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        """Build one ``ManualImport`` file entry, or ``None`` if unmapped."""
 
     def _queue_params(self) -> dict[str, Any]:
         return {}

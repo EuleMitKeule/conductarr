@@ -96,17 +96,22 @@ def filter_releases(
 _ALWAYS_BLOCKING = ("in queue", "blocklist")
 
 
-def unexpected_rejections(release: ReleaseResult, allowed: list[str]) -> list[str]:
-    """Return the rejections of *release* that are not on the allow-list."""
+def unexpected_messages(messages: list[str], allowed: list[str]) -> list[str]:
+    """Return the rejection *messages* that are not on the allow-list."""
     allowed_lower = [a.lower() for a in allowed if a]
     result: list[str] = []
-    for rejection in release.rejections:
-        text = rejection.lower()
+    for message in messages:
+        text = message.lower()
         if any(b in text for b in _ALWAYS_BLOCKING) or not any(
             a in text for a in allowed_lower
         ):
-            result.append(rejection)
+            result.append(message)
     return result
+
+
+def unexpected_rejections(release: ReleaseResult, allowed: list[str]) -> list[str]:
+    """Return the rejections of *release* that are not on the allow-list."""
+    return unexpected_messages(release.rejections, allowed)
 
 
 def is_pack(release: ReleaseResult) -> bool:

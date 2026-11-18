@@ -336,3 +336,85 @@ class TestSonarr:
         pack, single = await sonarr.search_releases(42)
         assert pack.full_season and pack.mapped_media_ids == [1, 2]
         assert single.mapped_media_ids == [42]
+
+
+class TestImportCompletedDownload:
+    async def test_download_status_keeps_only_file_messages(
+        self, sonarr: SonarrClient, mocked: Any
+    ) -> None:
+        mocked.get(
+            _url(SONARR, "queue"),
+            payload={
+                "totalRecords": 2,
+                "records": [
+                    {
+                        "downloadId": "SABnzbd_nzo_1",
+                        "status": "completed",
+                        "trackedDownloadState": "importPending",
+                        "statusMessages": [
+                            {"title": "One or more episodes ...", "messages": []},
+                            {"title": "file.mkv", "messages": ["Not an upgrade"]},
+                        ],
+                    },
+                    {"downloadId": "other", "status": "completed"},
+                ],
+            },
+        )
+        (status,) = await sonarr.get_download_status("sabnzbd_nzo_1")
+        assert status.state == "importPending"
+        assert status.messages == ["Not an upgrade"]
+
+    async def test_imports_only_allowed_files(
+        self, sonarr: SonarrClient, mocked: Any
+    ) -> None:
+        mocked.get(
+            _url(SONARR, "manualimport"),
+            payload=[
+                {
+                    "path": "/dl/a.mkv",
+                    "folderName": "dl",
+                    "series": {"id": 5},
+                    "episodes": [{"id": 50}],
+                    "quality": {"quality": {"name": "WEBDL-1080p"}},
+                    "languages": [{"id": 4, "name": "German"}],
+                    "releaseGroup": "GRP",
+                    "rejections": [{"reason": "Not an upgrade for existing file"}],
+                },
+                {
+                    "path": "/dl/sample.mkv",
+                    "series": {"id": 5},
+                    "episodes": [{"id": 51}],
+                    "rejections": [{"reason": "Sample"}],
+                },
+                {"path": "/dl/unmapped.mkv", "series": {"id": 5}, "episodes": []},
+            ],
+        )
+        mocked.post(_url(SONARR, "command"), payload={"id": 1})
+        count = await sonarr.import_completed_download(
+            "nzo_1", lambda rejections: all("upgrade" in r for r in rejections)
+        )
+        assert count == 1
+        posts = [
+            call
+            for (method, _), calls in mocked.requests.items()
+            if method == "POST"
+            for call in calls
+        ]
+        body = posts[0].kwargs["json"]
+        assert body["name"] == "ManualImport"
+        (file,) = body["files"]
+        assert file["path"] == "/dl/a.mkv"
+        assert file["seriesId"] == 5 and file["episodeIds"] == [50]
+        assert file["downloadId"] == "nzo_1"
+
+    async def test_nothing_importable_posts_nothing(
+        self, radarr: RadarrClient, mocked: Any
+    ) -> None:
+        mocked.get(
+            _url(RADARR, "manualimport"),
+            payload=[
+                {"path": "/dl/x.mkv", "movie": {"id": 3}, "rejections": ["Sample"]}
+            ],
+        )
+        assert await radarr.import_completed_download("nzo_2", lambda r: not r) == 0
+        assert all(method == "GET" for (method, _) in mocked.requests)

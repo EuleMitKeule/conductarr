@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-__all__ = ["ArrQueueItem", "MediaState", "ReleaseResult"]
+__all__ = ["ArrDownloadStatus", "ArrQueueItem", "MediaState", "ReleaseResult"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,3 +52,16 @@ class ArrQueueItem:
     media_id: int  # movie_id (Radarr) or episode_id (Sonarr)
     title: str
     protocol: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ArrDownloadStatus:
+    """Import state of one Arr queue record for a finished download."""
+
+    download_id: str
+    status: str
+    """Queue record status, e.g. ``completed`` or ``downloading``."""
+    state: str
+    """``trackedDownloadState``, e.g. ``importPending`` or ``importBlocked``."""
+    messages: list[str] = field(default_factory=list)
+    """Per-file rejection messages (the generic per-release titles are dropped)."""
