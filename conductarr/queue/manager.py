@@ -32,6 +32,7 @@ from conductarr.config import ConductarrConfig, UpgradeConfig
 from conductarr.db.repository import QueueRepository
 from conductarr.queue.matchers import MATCHER_REGISTRY
 from conductarr.queue.models import AssignContext, QueueItem, VirtualQueue
+from conductarr.upgrade.importer import add_pending_import
 from conductarr.upgrade.selection import media_satisfies_conditions
 
 _LOGGER = logging.getLogger(__name__)
@@ -424,6 +425,11 @@ class QueueManager:
                     item.metadata["upgrade_last_searched_at"] = now
                     if was_grab:
                         item.metadata["upgrade_completed_at"] = now
+                        # The Arr refuses to import its own "not an upgrade"
+                        # releases; ImportFinisher completes that import.
+                        await add_pending_import(
+                            self._repo, nzo_id, item.source, item.virtual_queue
+                        )
                 else:
                     # The failed release title stays in upgrade_grabbed_titles,
                     # so a retry never picks the same release again.

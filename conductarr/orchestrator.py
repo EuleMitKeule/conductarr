@@ -29,6 +29,7 @@ from conductarr.clients.sonarr import SonarrClient
 from conductarr.config import ConductarrConfig, Config
 from conductarr.db.database import Database
 from conductarr.db.repository import QueueRepository
+from conductarr.upgrade.importer import ImportFinisher
 from conductarr.queue.manager import NzoEntry, QueueManager, QueueSnapshot
 from conductarr.upgrade.scheduler import DryRunCandidateResult, UpgradeScheduler
 
@@ -70,6 +71,9 @@ class Orchestrator:
         )
         self._scheduler = UpgradeScheduler(
             conductarr_config, self._repository, self._arr_clients, self._queue_manager
+        )
+        self._importer = ImportFinisher(
+            conductarr_config, self._repository, self._arr_clients
         )
         self._snapshot: QueueSnapshot | None = None
         self._tasks: list[asyncio.Task[None]] = []
@@ -134,6 +138,7 @@ class Orchestrator:
     async def poll_once(self) -> None:
         """Run one queue cycle followed by one upgrade cycle (used by tests)."""
         self._snapshot = await self._queue_manager.run_cycle()
+        await self._importer.run_cycle()
         await self._scheduler.run_cycle(self._snapshot)
 
     async def scan_library(self) -> None:
@@ -197,6 +202,12 @@ class Orchestrator:
                 )
                 first = False
                 await self._repository.prune_search_log()
+                try:
+                    await asyncio.wait_for(
+                        self._importer.run_cycle(), timeout=2 * search_timeout
+                    )
+                except TimeoutError:
+                    _LOGGER.error("Import finishing timed out and was aborted")
                 snapshot = self._snapshot
                 if (
                     snapshot is not None

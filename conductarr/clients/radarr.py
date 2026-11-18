@@ -20,6 +20,12 @@ class RadarrClient(ArrClient):
     def _queue_media_key(self) -> str:
         return "movieId"
 
+    def _manual_import_file(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        movie = item.get("movie") or {}
+        if not movie.get("id"):
+            return None
+        return {**self._common_import_fields(item), "movieId": int(movie["id"])}
+
     async def _get_movie(self, movie_id: int) -> dict[str, Any] | None:
         try:
             data = await self._request("GET", f"movie/{movie_id}")

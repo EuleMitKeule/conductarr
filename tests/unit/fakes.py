@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from conductarr.clients.arr import ArrClient, ArrConnectionError
-from conductarr.clients.release import ArrQueueItem, MediaState, ReleaseResult
+from conductarr.clients.release import (
+    ArrDownloadStatus,
+    ArrQueueItem,
+    MediaState,
+    ReleaseResult,
+)
 from conductarr.clients.sabnzbd import Queue, QueueSlot, SABnzbdClient
 from conductarr.config import (
     AcceptConditionConfig,
@@ -132,6 +137,30 @@ class FakeArr(ArrClient):
         self.fail_search = False
         self.fail_queue = False
         self.on_grab: Callable[[ReleaseResult], Awaitable[None]] | None = None
+        # download_id -> queue records / manualimport file rejections
+        self.download_status: dict[str, list[ArrDownloadStatus]] = {}
+        self.import_files: dict[str, list[list[str]]] = {}
+        self.imports: list[tuple[str, int]] = []
+        self.fail_import = False
+
+    def _manual_import_file(self, item: dict[str, Any]) -> dict[str, Any] | None:
+        return dict(item)
+
+    async def get_download_status(self, download_id: str) -> list[ArrDownloadStatus]:
+        return list(self.download_status.get(download_id, []))
+
+    async def import_completed_download(
+        self, download_id: str, is_allowed: Callable[[list[str]], bool]
+    ) -> int:
+        if self.fail_import:
+            raise ArrConnectionError("import failed")
+        count = sum(
+            1 for rej in self.import_files.get(download_id, []) if is_allowed(rej)
+        )
+        self.imports.append((download_id, count))
+        if count:
+            self.download_status.pop(download_id, None)
+        return count
 
     def add_media(
         self,
